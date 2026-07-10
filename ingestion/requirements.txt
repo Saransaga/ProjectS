@@ -1,0 +1,6 @@
+psycopg2-binary==2.9.9
+redis==5.0.8
+requests==2.32.3
+APScheduler==3.10.4
+click==8.1.7
+tenacity==9.0.0

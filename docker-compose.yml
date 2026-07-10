@@ -37,6 +37,25 @@ services:
     networks:
       - storage
 
+  ingestion:
+    build:
+      context: ./ingestion
+    container_name: storage-ingestion
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      TZ: Asia/Kolkata
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - storage
+
 networks:
   storage:
     driver: bridge
