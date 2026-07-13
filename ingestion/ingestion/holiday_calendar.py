@@ -15,9 +15,13 @@ avoid making a request on known holidays.
 
 import json
 import os
-from datetime import date
+from datetime import date, datetime, time
+from zoneinfo import ZoneInfo
 
 _HOLIDAYS_PATH = os.path.join(os.path.dirname(__file__), "holidays.json")
+_IST = ZoneInfo("Asia/Kolkata")
+_MARKET_OPEN = time(9, 15)
+_MARKET_CLOSE = time(15, 30)
 
 
 def _load_holidays() -> set[str]:
@@ -36,3 +40,14 @@ def is_trading_day(d: date) -> bool:
     if d.isoformat() in _HOLIDAYS:
         return False
     return True
+
+
+def is_market_hours(dt: datetime | None = None) -> bool:
+    """NSE/BSE regular trading session (09:15-15:30 IST) on a trading day.
+    Used to gate high-frequency polling (exchange announcements) to when new
+    filings can actually land — RSS/social jobs run around the clock since
+    news doesn't stop at 15:30."""
+    now = (dt or datetime.now(_IST)).astimezone(_IST)
+    if not is_trading_day(now.date()):
+        return False
+    return _MARKET_OPEN <= now.time() <= _MARKET_CLOSE

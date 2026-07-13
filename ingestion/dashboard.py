@@ -9,9 +9,17 @@ import psycopg2
 import streamlit as st
 
 from ingestion.config import config
+from ingestion.jobs.bse_announcements import BseAnnouncementsJob
 from ingestion.jobs.candlestick_patterns import CandlestickPatternsJob
+from ingestion.jobs.corporate_actions import CorporateActionsJob
 from ingestion.jobs.equity_eod import EquityEodJob
+from ingestion.jobs.financial_results import FinancialResultsJob
+from ingestion.jobs.fundamental_ratios import FundamentalRatiosJob
 from ingestion.jobs.index_eod import IndexEodJob
+from ingestion.jobs.nse_announcements import NseAnnouncementsJob
+from ingestion.jobs.reddit_sentiment import RedditSentimentJob
+from ingestion.jobs.rss_news import RssNewsJob
+from ingestion.jobs.shareholding_pattern import ShareholdingPatternJob
 from ingestion.jobs.signal_events import SignalEventsJob
 from ingestion.jobs.technical_indicators import TechnicalIndicatorsJob
 
@@ -23,6 +31,14 @@ JOBS = {
     "technical_indicators": TechnicalIndicatorsJob,
     "candlestick_patterns": CandlestickPatternsJob,
     "signal_events": SignalEventsJob,
+    "corporate_actions": CorporateActionsJob,
+    "shareholding_pattern": ShareholdingPatternJob,
+    "financial_results": FinancialResultsJob,
+    "fundamental_ratios": FundamentalRatiosJob,
+    "nse_announcements": NseAnnouncementsJob,
+    "bse_announcements": BseAnnouncementsJob,
+    "rss_news": RssNewsJob,
+    "reddit_sentiment": RedditSentimentJob,
 }
 
 # table -> (date column to sort/filter by, whether it joins to instruments)
@@ -33,6 +49,11 @@ TABLES = {
     "candlestick_patterns_daily": ("trade_date", True),
     "signal_events": ("event_date", True),
     "support_resistance_levels": ("computed_date", True),
+    "corporate_actions": ("ex_date", True),
+    "shareholding_pattern": ("period_end_date", True),
+    "fundamentals_quarterly": ("period_end_date", True),
+    "fundamental_ratios": ("as_of_date", True),
+    "news_items": ("published_at", False),
     "ingestion_log": ("run_date", False),
 }
 

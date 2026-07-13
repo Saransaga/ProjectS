@@ -16,6 +16,18 @@ _NO_DATA_EXCEPTIONS = (NseNoDataError, BseNoDataError)
 class BaseJob:
     job_name: str = ""
 
+    # True for jobs whose schedule doesn't align with is_trading_day()'s
+    # weekday/holiday gate: real-time feeds that always pull "whatever's
+    # current right now" regardless of run_date (RSS/Reddit news, NSE/BSE
+    # announcements — these should poll every day including weekends), and
+    # batch jobs deliberately scheduled on a non-trading day (e.g. a weekly
+    # recompute cron'd for Sunday, which is_trading_day() would otherwise
+    # reject on every single run). A property on the job class rather than a
+    # force=True the caller has to remember to pass, so every caller (CLI,
+    # scheduler, dashboard) behaves consistently without each maintaining its
+    # own allowlist.
+    always_force: bool = False
+
     def fetch(self, run_date: date) -> list[dict]:
         """Return rows with symbol/exchange/instrument_type/series/name/isin plus
         OHLCV fields. Raise NseNoDataError/BseNoDataError if the exchange has no
@@ -23,6 +35,7 @@ class BaseJob:
         raise NotImplementedError
 
     def run(self, run_date: date, force: bool = False) -> str:
+        force = force or self.always_force
         if not force and not is_trading_day(run_date):
             self._log(run_date, "SKIPPED", 0, "not a trading day (weekend/known holiday)")
             return "SKIPPED"

@@ -193,3 +193,166 @@ CREATE TABLE IF NOT EXISTS support_resistance_levels (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sr_levels_instrument_computed ON support_resistance_levels (instrument_id, computed_date DESC);
+
+-- ============================================================================
+-- Domain 3 — Fundamental Data (Phase 3a)
+-- Sourced from NSE's corporate-filings APIs (corporate actions, board
+-- meetings, shareholding pattern, financial-results XBRL). See
+-- ingestion/ingestion/nse_corporate_client.py for the source endpoints and
+-- README.md for what's deferred to Phase 3b (full income statement/balance
+-- sheet/cash flow, ROE/ROCE/ROA, P/B, EV/EBITDA, P/FCF, Forward P/E).
+-- ============================================================================
+
+-- One row per corporate action, best-effort classified from NSE's free-text
+-- subject line (e.g. "Dividend - Rs 2 Per Share", "Bonus 1:1").
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    action_id          BIGSERIAL PRIMARY KEY,
+    instrument_id       BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    ex_date             DATE,
+    record_date         DATE,
+    action_type         TEXT CHECK (action_type IN ('DIVIDEND','BONUS','SPLIT','BUYBACK','RIGHTS','OTHER')),
+    amount_per_share    NUMERIC(14,4),
+    ratio_new           INTEGER,
+    ratio_old           INTEGER,
+    face_value_from     NUMERIC(10,2),
+    face_value_to       NUMERIC(10,2),
+    raw_subject         TEXT NOT NULL,
+    series              TEXT,
+    source              TEXT NOT NULL DEFAULT 'NSE',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A plain UNIQUE(instrument_id, ex_date, raw_subject) can't dedup a pending
+-- action NSE hasn't dated yet (ex_date NULL) — Postgres treats NULL <> NULL
+-- for uniqueness, so CorporateActionsJob's daily re-fetch of "whatever's
+-- current" would insert a fresh duplicate row every day until NSE publishes
+-- an ex-date. COALESCE to a fixed sentinel so NULL participates too.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_corporate_actions_dedup
+    ON corporate_actions (instrument_id, COALESCE(ex_date, DATE '0001-01-01'), raw_subject);
+
+CREATE INDEX IF NOT EXISTS idx_corporate_actions_instrument ON corporate_actions (instrument_id, ex_date DESC);
+CREATE INDEX IF NOT EXISTS idx_corporate_actions_type ON corporate_actions (action_type, ex_date DESC);
+
+-- Promoter %/Public % come straight off NSE's bulk shareholding-pattern list
+-- (no XBRL parsing needed); FII/DII/pledged % require parsing the dimensional
+-- shareholding-pattern XBRL and are populated best-effort — may be NULL.
+CREATE TABLE IF NOT EXISTS shareholding_pattern (
+    instrument_id         BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    period_end_date       DATE NOT NULL,
+    promoter_pct          NUMERIC(6,3),
+    public_pct            NUMERIC(6,3),
+    fii_pct               NUMERIC(6,3),
+    dii_pct               NUMERIC(6,3),
+    pledged_promoter_pct  NUMERIC(6,3),
+    submission_date       DATE,
+    xbrl_url              TEXT,
+    source                TEXT NOT NULL DEFAULT 'NSE',
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (instrument_id, period_end_date)
+);
+
+-- Quarterly P&L line items pulled from the `in-bse-fin` XBRL taxonomy.
+-- ebitda_derived is a standard reconciliation (PBT + finance costs +
+-- depreciation - other income), not a disclosed figure.
+-- CAVEAT (verified against a real filing, not assumed): debt_to_equity and
+-- interest_coverage_ratio are tagged directly in the XBRL, but they are the
+-- SEBI LODR Reg 52(4) ratios scoped to *listed debt securities* (NCDs/bonds)
+-- only, not the company's overall debt position. A company with no listed
+-- bonds will show ~0 here even if genuinely leveraged — do not treat these
+-- as general leverage/quality signals without checking the company actually
+-- has listed debt securities. General D/E needs the (annual-only) balance
+-- sheet — see README, deferred to Phase 3b.
+-- No balance sheet/cash flow columns here: SEBI LODR Reg 33 only requires
+-- those with annual results, not quarterly (see README).
+CREATE TABLE IF NOT EXISTS fundamentals_quarterly (
+    instrument_id            BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    period_end_date          DATE NOT NULL,
+    financial_year           TEXT,
+    reporting_quarter        TEXT,
+    consolidated             BOOLEAN NOT NULL,
+    revenue                  NUMERIC(20,2),
+    pat                      NUMERIC(20,2),
+    eps_basic                NUMERIC(10,4),
+    eps_diluted               NUMERIC(10,4),
+    debt_to_equity           NUMERIC(10,4),
+    interest_coverage_ratio  NUMERIC(10,4),
+    ebitda_derived           NUMERIC(20,2),
+    shares_outstanding       BIGINT,  -- derived: paid-up capital / face value, for P/S
+    broadcast_date           TIMESTAMPTZ,
+    xbrl_url                 TEXT,
+    source                   TEXT NOT NULL DEFAULT 'NSE',
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (instrument_id, period_end_date, consolidated)
+);
+
+-- Recomputed weekly from fundamentals_quarterly + latest close (ohlcv_daily)
+-- + trailing dividends (corporate_actions). The Phase-3b-only columns
+-- (pb_ratio, ev_ebitda, pfcf_ratio, forward_pe, roe, roce, roa) are created
+-- now so this table won't need an ALTER later — they stay NULL until 3b.
+CREATE TABLE IF NOT EXISTS fundamental_ratios (
+    instrument_id     BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    as_of_date        DATE NOT NULL,
+    pe_ratio          NUMERIC(12,4),
+    ps_ratio          NUMERIC(12,4),
+    dividend_yield    NUMERIC(8,4),
+    payout_ratio      NUMERIC(8,4),
+    pb_ratio          NUMERIC(12,4),
+    ev_ebitda         NUMERIC(12,4),
+    pfcf_ratio        NUMERIC(12,4),
+    forward_pe        NUMERIC(12,4),
+    roe               NUMERIC(8,4),
+    roce              NUMERIC(8,4),
+    roa               NUMERIC(8,4),
+    computed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (instrument_id, as_of_date)
+);
+
+-- ============================================================================
+-- Domain 4 — News & Sentiment (Phase 4a)
+-- One unified table across every source type rather than a table per source
+-- (the pattern Domains 1-3 used) — the spec wants one sentiment/ticker/
+-- urgency treatment across heterogeneous sources, and a "breaking news for
+-- ticker X across every source" query is the whole point of this domain.
+-- NLP is lightweight by design (see README): alias-matching for ticker tags,
+-- a small hand-curated keyword lexicon for sentiment — not a trained NER/
+-- FinBERT model.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS news_items (
+    news_item_id              BIGSERIAL PRIMARY KEY,
+    source_type                TEXT NOT NULL CHECK (source_type IN (
+                                    'NSE_ANNOUNCEMENT', 'BSE_ANNOUNCEMENT',
+                                    'RSS_ET_MARKETS', 'RSS_MONEYCONTROL_BUSINESS',
+                                    'RSS_MONEYCONTROL_MARKETS', 'RSS_MINT',
+                                    'RSS_GOOGLE_NEWS', 'RSS_BUSINESS_STANDARD',
+                                    'REDDIT'
+                                )),
+    -- Source's own dedup key: NSE seq_id, RSS item guid/link, Reddit post id.
+    external_id                 TEXT NOT NULL,
+    headline                    TEXT NOT NULL,
+    summary                     TEXT,
+    url                         TEXT,
+    published_at                TIMESTAMPTZ,
+    fetched_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sentiment_label              TEXT CHECK (sentiment_label IN ('POSITIVE', 'NEGATIVE', 'NEUTRAL')),
+    sentiment_score               NUMERIC(5,4),  -- -1 (very negative) .. 1 (very positive)
+    urgency                     TEXT CHECK (urgency IN ('BREAKING', 'ROUTINE')),
+    relevance_score              NUMERIC(5,4),   -- 0..1, company-specific scores higher than generic market news
+    source_credibility_weight     NUMERIC(4,3),  -- static per source_type, see news/classify.py
+    created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source_type, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_news_items_published ON news_items (published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_news_items_urgency ON news_items (urgency, published_at DESC);
+
+-- Many-to-many: one article can name several companies (e.g. an M&A story).
+-- Keyed instrument-first since "recent news for ticker X" is the primary
+-- access pattern this table exists to serve.
+CREATE TABLE IF NOT EXISTS news_item_tickers (
+    instrument_id   BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    news_item_id    BIGINT NOT NULL REFERENCES news_items(news_item_id) ON DELETE CASCADE,
+    PRIMARY KEY (instrument_id, news_item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_news_item_tickers_item ON news_item_tickers (news_item_id);
