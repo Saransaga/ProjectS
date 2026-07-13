@@ -3,15 +3,23 @@ from datetime import datetime, timedelta
 
 import click
 
+from .jobs.candlestick_patterns import CandlestickPatternsJob
 from .jobs.equity_eod import EquityEodJob
 from .jobs.index_eod import IndexEodJob
+from .jobs.signal_events import SignalEventsJob
+from .jobs.technical_indicators import TechnicalIndicatorsJob
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+# technical_indicators reads ohlcv_daily, so it must follow equity/index; signal_events
+# reads technical_indicators_daily (SMA 50/200 crossovers), so it must follow that.
+_ANALYTICS_JOBS = [TechnicalIndicatorsJob, CandlestickPatternsJob, SignalEventsJob]
 
 _JOBS = {
     "equity": [EquityEodJob],
     "index": [IndexEodJob],
-    "all": [EquityEodJob, IndexEodJob],
+    "analytics": _ANALYTICS_JOBS,
+    "all": [EquityEodJob, IndexEodJob, *_ANALYTICS_JOBS],
 }
 
 

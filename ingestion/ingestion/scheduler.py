@@ -3,15 +3,28 @@ from datetime import date
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
+from .jobs.candlestick_patterns import CandlestickPatternsJob
 from .jobs.equity_eod import EquityEodJob
 from .jobs.index_eod import IndexEodJob
+from .jobs.signal_events import SignalEventsJob
+from .jobs.technical_indicators import TechnicalIndicatorsJob
 
 logger = logging.getLogger(__name__)
 
 
 def _run_daily_jobs():
     today = date.today()
-    for job in (EquityEodJob(), IndexEodJob()):
+    # Price ingestion first, then indicators (reads ohlcv_daily), then
+    # candlesticks and signal events (the latter reads sma_50/200 crossovers
+    # out of technical_indicators_daily, so it must come last).
+    jobs = (
+        EquityEodJob(),
+        IndexEodJob(),
+        TechnicalIndicatorsJob(),
+        CandlestickPatternsJob(),
+        SignalEventsJob(),
+    )
+    for job in jobs:
         try:
             status = job.run(today)
             logger.info("%s %s -> %s", job.job_name, today, status)

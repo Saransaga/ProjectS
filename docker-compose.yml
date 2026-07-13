@@ -56,6 +56,28 @@ services:
     networks:
       - storage
 
+  dashboard:
+    build:
+      context: ./ingestion
+    container_name: storage-dashboard
+    restart: unless-stopped
+    command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      TZ: Asia/Kolkata
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - storage
+
 networks:
   storage:
     driver: bridge
