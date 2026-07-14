@@ -78,6 +78,31 @@ services:
     networks:
       - storage
 
+  # Domain 8's reactive Telegram side — a permanent long-poll loop
+  # (telegram_bot/telegram_listener.py), not a cron tick, so it gets its own
+  # always-on service rather than riding along in the `ingestion` container's
+  # scheduler.py process. TelegramAlertsJob (the proactive/digest side) still
+  # runs from `ingestion`/Airflow on its own daily schedule.
+  telegram-listener:
+    build:
+      context: ./ingestion
+    container_name: storage-telegram-listener
+    restart: unless-stopped
+    command: ["python", "-m", "ingestion.telegram_bot.telegram_listener"]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      TZ: Asia/Kolkata
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - storage
+
   # --- Airflow: orchestrates the same ingestion CLI scheduler.py already
   # uses, via DockerOperator launching throwaway containers from the
   # `ingestion` image above (see airflow/dags/_ingestion_docker.py). Kept on

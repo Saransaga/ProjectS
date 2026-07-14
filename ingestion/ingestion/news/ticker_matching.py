@@ -6,6 +6,14 @@ disambiguation. A company name that collides with a common English word
 could false-positive; unusual phrasing that doesn't match any alias just
 tags nothing. Good enough for "does this mention a company we track", not
 publication-grade NER — see README.
+
+normalize_name is public (not a news-only helper) because query/resolve.py
+(Domain 8) reuses it for Telegram free-text symbol resolution — match_tickers
+itself only works when the alias is *shorter than or equal to* the input
+text (a substring search), which is backwards for a short chat query like
+"reliance" that's shorter than the alias "reliance industries"; resolve.py
+does its own bidirectional containment check against normalize_name's output
+instead of calling match_tickers for that case. See resolve.py's docstring.
 """
 
 import re
@@ -18,7 +26,7 @@ _NON_WORD_RE = re.compile(r"[^\w\s]")
 _MIN_NAME_LENGTH = 4  # skip normalized names too short/ambiguous to match safely
 
 
-def _normalize_name(name: str) -> str:
+def normalize_name(name: str) -> str:
     name = _SUFFIX_RE.sub("", name)
     name = _NON_WORD_RE.sub(" ", name)
     return " ".join(name.split()).strip()
@@ -37,7 +45,7 @@ def build_alias_index(conn) -> list[tuple[re.Pattern, int]]:
     patterns = []
     for instrument_id, symbol, name in rows:
         patterns.append((re.compile(rf"\b{re.escape(symbol)}\b"), instrument_id))
-        normalized = _normalize_name(name or "")
+        normalized = normalize_name(name or "")
         if len(normalized) >= _MIN_NAME_LENGTH:
             patterns.append((re.compile(rf"\b{re.escape(normalized)}\b", re.IGNORECASE), instrument_id))
     return patterns

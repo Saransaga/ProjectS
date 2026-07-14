@@ -55,6 +55,8 @@ docker compose exec ingestion python -m ingestion.cli backfill-range --job <grou
 | `brokerage`      | `brokerage_calls`, `consensus_ratings`                                  | daily 17:00 IST, after `equity`/`index`                 |
 | `momentum`       | `fii_dii_flows`, `bulk_block_deals`, `fno_bhavcopy`, `fno_signals`, `deliverable_volume`, `relative_strength` | 17:15 IST (F&O/delivery/RS) + 18:00 IST (FII/DII) + 2 intraday windows (bulk/block deals) |
 | `events`         | `corporate_calendar`, `ipo_listings`, `index_rebalancing_schedule`       | daily 19:00 IST (calendar/IPO) + monthly 1st, 09:00 IST (rebalancing) |
+| `recommendations`| `industry_classification`, `recommendation_engine`                      | monthly 1st, 08:30 IST (classification) + daily 21:00 IST (recompute) |
+| `telegram`       | `telegram_alerts`                                                       | daily 21:00 IST, after `recommendation_engine`           |
 | `all`            | everything above                                                         | —                                                        |
 
 Re-running a date that already succeeded is a safe no-op — add `--force` to
@@ -463,3 +465,67 @@ CLI; `macro-event add` (above) is separate since it isn't a scheduled job.
 estimates (Trendlyne dead, no other free source), and a BSE corporate
 calendar (dead — Angular SPA, no working API, same conclusion as
 `bse_client.py`'s existing findings).
+
+## Recommendation engine & Telegram alerts/Q&A (Phase 8a)
+
+Turns Domains 1-7's data into a per-instrument recommendation, and pushes it
+through a multi-user Telegram bot rather than only the Streamlit dashboard.
+
+- **`industry_classification`** (adds `instruments.sector`/`instruments.industry`):
+  scrapes NSE Indices' 18 sectoral/thematic-index constituent CSVs
+  (`niftyindices_client.fetch_sector_constituents`, e.g.
+  `ind_niftyautolist.csv`) and maps each constituent's classification onto
+  `instruments.sector`. Coverage is partial by design — only symbols that are
+  members of a curated sectoral index get classified, everything else stays
+  `NULL`. `instruments.industry` is deliberately left `NULL`: the CSVs' own
+  "Industry" column is actually sector-tier granularity (verified live —
+  e.g. Ashok Leyland, a commercial-vehicle maker, is classified "Capital
+  Goods" in `ind_niftyautolist.csv`, not anything auto-specific), so mapping
+  it to `industry` would overstate this source's precision. This is Domain
+  6's long-deferred sector-rotation blocker, but sector-rotation signals
+  stay deferred even with `sector` populated — coverage and tuning aren't
+  there yet.
+- **`recommendation_engine`** (`stock_recommendations`): computes a
+  short-term (technical/momentum) and long-term (fundamentals/valuation)
+  score per instrument, each a weighted average of several -2..+2
+  subscores (`ingestion/ingestion/recommendation/short_term.py`/
+  `long_term.py`), bucketed into `STRONG_BUY`..`STRONG_SELL` via the same
+  5-level vocabulary Domain 5's consensus ratings use
+  (`rating_vocabulary.py`). Scoring is 100% deterministic/heuristic —
+  deliberately no LLM. A component subscore is `NULL` only when its source
+  data genuinely doesn't exist for that instrument (e.g. no F&O contract,
+  fewer than 2 shareholding periods), never a fabricated 0; the composite
+  score itself goes `NULL` (with `{"insufficient_data": true}` in the
+  paired rationale JSONB column) when fewer than half the weight budget had
+  real data, rather than compute from a mostly-missing picture.
+- **`telegram_alerts`** (`telegram_alert_log`): pushes two kinds of message
+  to every chat in `telegram_chats` (auto-populated as chats message the
+  bot — there's deliberately no hardcoded chat ID, since multi-user support
+  is a requirement from day one): a per-chat watchlist alert when a watched
+  instrument's `short_term_action`/`long_term_action` actually changed since
+  the last alert (anti-spam state in `telegram_watchlist_alert_state`), and
+  a daily top-N buy/sell digest. A chat that blocks the bot (`sendMessage`
+  returns HTTP 403) gets `telegram_chats.is_active` flipped `FALSE` so it
+  stops being retried forever.
+- **`telegram-listener`** (`ingestion/ingestion/telegram_bot/`, not a cron
+  job): an always-on long-poll loop against the Telegram Bot API, its own
+  `docker-compose` service since a permanent blocking loop can't be modeled
+  as a scheduled tick. Answers `/watch`, `/unwatch`, `/list`, `/recommend`,
+  or a bare symbol/company-name lookup — free-text company names resolve via
+  `query/resolve.py`, which reuses Domain 4's
+  `news/ticker_matching.normalize_name` for fuzzy matching (with its own
+  bidirectional containment check, since a short chat query like "reliance"
+  is shorter than the alias "reliance industries" — backwards from
+  `match_tickers`' substring-search assumption).
+- **`TELEGRAM_BOT_TOKEN`** (from @BotFather) is the only new required
+  secret. Left unset, both `telegram_alerts` and `telegram-listener` log a
+  clear message and no-op rather than crashing — same graceful-degradation
+  pattern as Domain 4's Reddit credentials.
+
+See `--job recommendations` / `--job telegram` in [Usage](#usage) for the
+scheduled jobs' CLI; `telegram-listener` is a separate always-on
+`docker-compose` service, not reachable through `--job`.
+
+**Deferred**: sector-rotation signals (Domain 6) — `instruments.sector`
+coverage is partial and untuned against real data; a trained ranking model
+in place of the deterministic heuristic scorer.

@@ -71,6 +71,13 @@ def ingestion_task(task_id: str, job_name: str, **kwargs) -> DockerOperator:
             "POSTGRES_PASSWORD": os.environ["POSTGRES_PASSWORD"],
             "POSTGRES_DB": os.environ["POSTGRES_DB"],
             "REDIS_HOST": os.environ.get("REDIS_HOST", "redis"),
+            # Only telegram_alerts.py reads this; every other job ignores it.
+            # Forwarded (rather than added ad hoc per-DAG) so a container
+            # launched by any DAG behaves the same as one launched by the CLI
+            # directly. Empty string (not unset) when absent from .env —
+            # config.py's `not config.TELEGRAM_BOT_TOKEN` check treats "" the
+            # same as unset.
+            "TELEGRAM_BOT_TOKEN": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
             "TZ": "Asia/Kolkata",
         },
         **kwargs,

@@ -144,9 +144,11 @@ diagram.
 ## 2. Scheduled flows (as of this write-up)
 
 The `ingestion` service runs one **APScheduler `BlockingScheduler`**
-(`ingestion/scheduler.py`) with **11 distinct cron entries**, executing
-**24 job classes** in total (some jobs are bundled 2-6 to a slot). All
-times are IST.
+(`ingestion/scheduler.py`) with **13 distinct cron entries**, executing
+**27 job classes** in total (some jobs are bundled 2-6 to a slot). All
+times are IST. A 14th, always-on process (`telegram-listener`, Domain 8) is
+a permanent long-poll loop, not a cron entry — see its own row below the
+table.
 
 | # | APScheduler `id` | Cron | Job classes run (in order) |
 |---|---|---|---|
@@ -161,6 +163,13 @@ times are IST.
 | 9 | `bulk_block_deals_poll` | 12:00 & 16:00, Mon-Fri | BulkBlockDeals |
 | 10 | `daily_events_ingest` | 19:00 daily | CorporateCalendar, IpoListings |
 | 11 | `monthly_index_rebalancing` | 1st of month, 09:00 | IndexRebalancingSchedule |
+| 12 | `monthly_industry_classification` | 1st of month, 08:30 | IndustryClassification |
+| 13 | `daily_recommendation_ingest` | 21:00 daily | RecommendationEngine, TelegramAlerts |
+
+`telegram-listener` (Domain 8) runs as its own always-on `docker-compose`
+service, not a cron entry — a Telegram long-poll loop blocks forever by
+design, so it can't be modeled as a scheduled tick the way the 13 rows
+above are.
 
 Every job also carries `misfire_grace_time` + `coalesce=True` (a missed
 tick catches up once, doesn't pile up), and reads/writes its own row in
@@ -168,7 +177,7 @@ tick catches up once, doesn't pile up), and reads/writes its own row in
 dashboard's "Latest run per job" / "Recent job runs" views are just
 queries over that table.
 
-**Airflow migration — done, not just planned.** All 11 rows above now also
+**Airflow migration — done, not just planned.** All 13 rows above now also
 exist as Airflow DAGs (`airflow/dags/`, one file per row, same names),
 verified live end-to-end in this environment: `docker compose up` brings
 up a dedicated Airflow (its own Postgres metadata DB, LocalExecutor), each
@@ -197,9 +206,10 @@ plan from `scheduler.py`.
   flow, YoY/QoQ growth, ROE/ROCE/ROA, P/B, EV/EBITDA, P/FCF, Forward P/E.
 - **Chart pattern detection** (Domain 2): needs its own geometric-heuristic
   design pass, not a drop-in library.
-- **Sector/industry classification**: `instruments` has none; blocks
-  sector-rotation signals (Domain 6) and could improve relevance scoring
-  elsewhere.
+- **Sector/industry classification**: `instruments.sector` now exists
+  (Domain 8's `IndustryClassificationJob`), but coverage is partial
+  (sectoral-index members only) and untuned — sector-rotation signals
+  (Domain 6) are still deferred, not unblocked by this alone.
 - **Sensex/BSE data generally**: index history, bulk/block deals,
   corporate calendar, and general BSE API reliability are all either
   unverified or confirmed dead in this environment. Every BSE finding
@@ -219,8 +229,54 @@ plan from `scheduler.py`.
   paused by default, and the cutover is meant to happen one DAG at a time
   (unpause, watch it succeed for a few days, then remove that entry from
   `scheduler.py`), not as a single switch-flip. `scheduler.py` should stay
-  running until all 11 DAGs have been individually cut over.
+  running until all 13 DAGs have been individually cut over.
 - **No alerting configured yet** on the Airflow side (e.g. on-failure
   Slack/email callbacks) — task failures are currently only visible by
   checking the Airflow UI or `ingestion_log`, same visibility gap as
   before for anyone not actively watching either.
+
+### Domain 8 — Recommendation engine & Telegram alerts/Q&A (Phase 8a)
+- **Tables**: `stock_recommendations`, `telegram_chats`, `telegram_watchlist`,
+  `telegram_watchlist_alert_state`, `telegram_alert_log`. Also adds
+  `instruments.sector`/`instruments.industry` (Domain 6's long-deferred
+  sector-rotation blocker — only the `sector` column is actually populated;
+  see below).
+- **Jobs**: `industry_classification` (populates `instruments.sector` from
+  NSE Indices' sectoral/thematic-index constituent CSVs — coverage is
+  partial by design, only symbols that are members of a curated sectoral
+  index get classified), `recommendation_engine` (recomputes a short-term/
+  long-term BUY..SELL recommendation per instrument from Domains 1-7's
+  tables — see `ingestion/ingestion/recommendation/` for the pure scoring
+  functions and `rating_vocabulary.py` for the shared 5-level bucket
+  vocabulary also used by Domain 5's consensus ratings), `telegram_alerts`
+  (pushes watchlist-change alerts + a daily top-N buy/sell digest to every
+  chat that's ever messaged the bot).
+- **New always-on process** (not a cron job): `telegram_bot/telegram_listener.py`
+  long-polls the Telegram Bot API and answers inbound chat messages —
+  `/watch`, `/unwatch`, `/list`, `/recommend`, or a bare symbol/company-name
+  lookup (resolved via `query/resolve.py`, which reuses Domain 4's
+  `news/ticker_matching.normalize_name` for company-name fuzzy matching).
+  Runs as its own `docker-compose` service (`telegram-listener`) since a
+  long-poll loop is a permanent blocking process, not a scheduled tick.
+- **Design notes**:
+  - Scoring is 100% deterministic/heuristic (weighted subscores, see
+    `recommendation/short_term.py`/`long_term.py`), deliberately no LLM.
+  - A component subscore is `NULL` only when its source data genuinely
+    doesn't exist for that instrument (e.g. no F&O contract, fewer than 2
+    shareholding periods) — never a fabricated 0; `aggregate.py` leaves the
+    whole composite score `NULL` when fewer than half the weight budget had
+    real data, rather than compute from a mostly-missing picture.
+  - `TELEGRAM_BOT_TOKEN` is the only new required secret (from
+    @BotFather); left unset, both `telegram_alerts` and the listener log a
+    clear message and no-op rather than crashing — same graceful-degradation
+    pattern as Domain 4's Reddit credentials. There's deliberately no
+    hardcoded `TELEGRAM_CHAT_ID` — the broadcast audience is entirely
+    DB-driven (`telegram_chats`, auto-populated as chats message the bot),
+    since multi-user support is a requirement from day one.
+- **Known limitation carried over from Domain 6**: `instruments.industry`
+  is deliberately left `NULL` by `industry_classification` — the sectoral
+  CSVs' own "Industry" column is actually sector-tier granularity, not
+  NSE's finer 4-tier industry scheme, so populating it there would silently
+  overstate this source's precision. Sector-rotation signals (deferred in
+  Domain 6) are *still* deferred even though `sector` now exists: coverage
+  is partial (sectoral-index members only) and untuned against real data.

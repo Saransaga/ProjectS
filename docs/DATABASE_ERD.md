@@ -2,7 +2,7 @@
 
 _Last updated: 2026-07-14_ — companion to [`PROJECT_STATUS.md`](./PROJECT_STATUS.md).
 
-30 relations total: 29 tables + 1 TimescaleDB continuous aggregate
+35 relations total: 34 tables + 1 TimescaleDB continuous aggregate
 (`ohlcv_weekly`). Attribute lists below are trimmed to PK/FK/UK plus a
 handful of defining columns for readability — see `init.sql` for the full
 column set and CHECK constraints. Mermaid renders this natively on GitHub;
@@ -237,6 +237,41 @@ erDiagram
         numeric close
     }
 
+    STOCK_RECOMMENDATIONS {
+        bigint instrument_id PK, FK
+        date as_of_date PK
+        numeric short_term_score
+        text short_term_action
+        numeric long_term_score
+        text long_term_action
+    }
+
+    TELEGRAM_CHATS {
+        bigint chat_id PK
+        text chat_type
+        boolean is_active
+    }
+
+    TELEGRAM_WATCHLIST {
+        bigint chat_id PK, FK
+        bigint instrument_id PK, FK
+    }
+
+    TELEGRAM_WATCHLIST_ALERT_STATE {
+        bigint chat_id PK, FK
+        bigint instrument_id PK, FK
+        text last_short_term_action
+        text last_long_term_action
+    }
+
+    TELEGRAM_ALERT_LOG {
+        bigint alert_id PK
+        bigint chat_id FK
+        text alert_scope
+        bigint instrument_id FK
+        text delivery_status
+    }
+
     INSTRUMENTS ||--o{ OHLCV_DAILY : "1 domain 1"
     INSTRUMENTS ||--o{ TECHNICAL_INDICATORS_DAILY : "1 domain 2"
     INSTRUMENTS ||--o{ CANDLESTICK_PATTERNS_DAILY : "1 domain 2"
@@ -257,6 +292,11 @@ erDiagram
     INSTRUMENTS ||--o{ RELATIVE_STRENGTH : "1 domain 6"
     INSTRUMENTS ||--o{ CORPORATE_CALENDAR : "1 domain 7"
     INSTRUMENTS |o--o{ IPO_LISTINGS : "0..1 domain 7 (NULL until listed)"
+    INSTRUMENTS ||--o{ STOCK_RECOMMENDATIONS : "1 domain 8"
+    TELEGRAM_CHATS ||--o{ TELEGRAM_WATCHLIST : "1 domain 8"
+    INSTRUMENTS ||--o{ TELEGRAM_WATCHLIST : "1 domain 8"
+    TELEGRAM_WATCHLIST ||--o| TELEGRAM_WATCHLIST_ALERT_STATE : "1 domain 8 (cascades on unwatch)"
+    TELEGRAM_CHATS ||--o{ TELEGRAM_ALERT_LOG : "1 domain 8"
 ```
 
 ## Notes the diagram can't express
@@ -286,6 +326,16 @@ erDiagram
   - `ipo_listings.instrument_id` is `NULL` until `IpoListingsJob` resolves
     the symbol's first `ohlcv_daily` row after `issue_end_date` — a stock
     mid-bidding has no `instruments` row yet, by definition.
+- **`telegram_watchlist_alert_state`** has a composite FK to
+  `telegram_watchlist(chat_id, instrument_id)` with `ON DELETE CASCADE` —
+  not to `instruments`/`telegram_chats` directly — so `/unwatch` deleting
+  one `telegram_watchlist` row atomically removes the matching alert-state
+  row too, without a second application-level delete.
+- **`stock_recommendations.short_term_score`/`long_term_score`/their
+  `*_action` columns** are all nullable together: `NULL` means
+  `recommendation/aggregate.py` found fewer than half the component
+  weights had real data (`insufficient_data: true` in the paired
+  `*_rationale` JSONB column), not a fabricated neutral score.
 
 ## Table count by domain
 
@@ -298,5 +348,6 @@ erDiagram
 | 5 — Brokerage | `moneycontrol_instrument_map`, `brokerage_calls`, `rating_change_events`, `consensus_ratings` |
 | 6 — Momentum | `fii_dii_cash_flows`, `fno_participant_oi`, `bulk_block_deals`, `fno_bhavcopy_daily`, `fno_signals`, `fno_oi_buildup`, `fno_rollover`, `relative_strength` |
 | 7 — Events & calendar | `corporate_calendar`, `ipo_listings`, `index_rebalancing_schedule`, `macro_events` |
+| 8 — Recommendations & Telegram | `stock_recommendations`, `telegram_chats`, `telegram_watchlist`, `telegram_watchlist_alert_state`, `telegram_alert_log` |
 
-**30 relations** (29 tables + 1 continuous aggregate) across 7 domains.
+**35 relations** (34 tables + 1 continuous aggregate) across 8 domains.

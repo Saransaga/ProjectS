@@ -7,34 +7,36 @@ rather than guessing, same "fail clearly, don't guess" approach as
 fundamentals/xbrl_financial.py's context-selection fallback. Pure function,
 no I/O."""
 
+from ..rating_vocabulary import RatingBucket
+
 _RATING_MAP = {
     # STRONG_BUY
-    "strong buy": "STRONG_BUY",
-    "conviction buy": "STRONG_BUY",
-    "top pick": "STRONG_BUY",
+    "strong buy": RatingBucket.STRONG_BUY,
+    "conviction buy": RatingBucket.STRONG_BUY,
+    "top pick": RatingBucket.STRONG_BUY,
     # BUY
-    "buy": "BUY",
-    "accumulate": "BUY",
-    "add": "BUY",
-    "outperform": "BUY",
-    "overweight": "BUY",
-    "positive": "BUY",
+    "buy": RatingBucket.BUY,
+    "accumulate": RatingBucket.BUY,
+    "add": RatingBucket.BUY,
+    "outperform": RatingBucket.BUY,
+    "overweight": RatingBucket.BUY,
+    "positive": RatingBucket.BUY,
     # HOLD
-    "hold": "HOLD",
-    "neutral": "HOLD",
-    "market perform": "HOLD",
-    "in-line": "HOLD",
-    "in line": "HOLD",
-    "equal-weight": "HOLD",
-    "equal weight": "HOLD",
+    "hold": RatingBucket.HOLD,
+    "neutral": RatingBucket.HOLD,
+    "market perform": RatingBucket.HOLD,
+    "in-line": RatingBucket.HOLD,
+    "in line": RatingBucket.HOLD,
+    "equal-weight": RatingBucket.HOLD,
+    "equal weight": RatingBucket.HOLD,
     # SELL
-    "sell": "SELL",
-    "reduce": "SELL",
-    "underperform": "SELL",
-    "underweight": "SELL",
-    "negative": "SELL",
+    "sell": RatingBucket.SELL,
+    "reduce": RatingBucket.SELL,
+    "underperform": RatingBucket.SELL,
+    "underweight": RatingBucket.SELL,
+    "negative": RatingBucket.SELL,
     # STRONG_SELL
-    "strong sell": "STRONG_SELL",
+    "strong sell": RatingBucket.STRONG_SELL,
 }
 
 

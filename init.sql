@@ -8,6 +8,15 @@ CREATE TABLE IF NOT EXISTS instruments (
     series          TEXT,
     name            TEXT,
     isin            TEXT,
+    -- Domain 8 addition: NSE sectoral-index classification (see
+    -- IndustryClassificationJob / niftyindices_client.fetch_sector_constituents).
+    -- Coverage is partial by design — only symbols that are members of an NSE
+    -- sectoral index get classified; smaller-cap stocks outside every
+    -- sectoral index stay NULL, same "leave NULL, don't guess" discipline as
+    -- everywhere else in this project. No CHECK constraint: sectoral index
+    -- names aren't a small fixed enum that won't change.
+    sector          TEXT,
+    industry        TEXT,
     first_seen_date DATE NOT NULL,
     last_seen_date  DATE NOT NULL,
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
@@ -638,10 +647,11 @@ CREATE TABLE IF NOT EXISTS fno_rollover (
 -- 3M/6M/1Y returns (IBD's official formula uses 3/6/9/12M weighted
 -- 40/20/20/20; this phase doesn't otherwise need a 9-month return, so
 -- substitutes the windows it does need to store — see
--- momentum/relative_strength.py). Sector rotation signals are deferred:
--- `instruments` carries no sector/industry classification in this phase
--- (see README), and fabricating a rotation signal on top of no sector data
--- would be worse than not shipping it.
+-- momentum/relative_strength.py). Sector rotation signals are still
+-- deferred even though instruments.sector/industry exist as of Domain 8:
+-- that classification job's coverage is partial (sectoral-index members
+-- only) and untuned against real data yet — see init.sql's Domain 8 section
+-- and the recommendation-engine plan's "future work" note.
 CREATE TABLE IF NOT EXISTS relative_strength (
     instrument_id            BIGINT NOT NULL REFERENCES instruments(instrument_id),
     trade_date               DATE NOT NULL,
@@ -779,3 +789,99 @@ CREATE TABLE IF NOT EXISTS macro_events (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (event_date, category)
 );
+
+-- ============================================================================
+-- Domain 8 — Recommendation Engine & Telegram Alerts/Q&A
+-- Turns Domains 1-7's data into a BUY/HOLD/SELL-style recommendation per
+-- instrument, separately for short-term (technical/momentum) and long-term
+-- (fundamentals/valuation) horizons (RecommendationEngineJob, see
+-- ingestion/ingestion/recommendation/), and pushes it via a Telegram bot that
+-- supports multiple chats/watchlists (TelegramAlertsJob + the always-on
+-- telegram-listener service, see ingestion/ingestion/telegram_bot/). Scoring
+-- stays 100% deterministic/heuristic, deliberately no LLM — see this
+-- domain's plan doc for why.
+-- ============================================================================
+
+-- One row per instrument per as_of_date. short_term_/long_term_score are a
+-- weighted average of several -2..+2 subscores (see recommendation/short_term.py
+-- /long_term.py); *_action buckets that score via the shared RatingBucket
+-- vocabulary (rating_vocabulary.py). Both stay NULL — not a fabricated
+-- guess — when fewer than half the component weights had real data to work
+-- with (rationale records {"insufficient_data": true} in that case); see
+-- recommendation/ package docstrings for the exact threshold and NULL-vs-0
+-- discipline.
+CREATE TABLE IF NOT EXISTS stock_recommendations (
+    instrument_id          BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    as_of_date             DATE NOT NULL,
+    short_term_score       NUMERIC(6,3),
+    short_term_action      TEXT CHECK (short_term_action IN ('STRONG_BUY','BUY','HOLD','SELL','STRONG_SELL')),
+    short_term_rationale   JSONB,
+    long_term_score        NUMERIC(6,3),
+    long_term_action       TEXT CHECK (long_term_action IN ('STRONG_BUY','BUY','HOLD','SELL','STRONG_SELL')),
+    long_term_rationale    JSONB,
+    computed_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (instrument_id, as_of_date)
+);
+
+-- Serves TelegramAlertsJob's daily "top N strongest buy/sell" digest query.
+CREATE INDEX IF NOT EXISTS idx_stock_recommendations_short ON stock_recommendations (as_of_date, short_term_score DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_recommendations_long ON stock_recommendations (as_of_date, long_term_score DESC);
+
+-- Every Telegram chat that has ever messaged the bot — auto-populated by
+-- telegram_bot/commands.py on every inbound update, not a hardcoded chat ID,
+-- since multi-user support is a requirement from day one. This *is* the
+-- digest broadcast audience (WHERE is_active). is_active flips FALSE when
+-- sendMessage gets an HTTP 403 (bot blocked by that user), so a stale chat
+-- stops being retried forever.
+CREATE TABLE IF NOT EXISTS telegram_chats (
+    chat_id               BIGINT PRIMARY KEY,
+    chat_type             TEXT NOT NULL,
+    username              TEXT,
+    first_interaction_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_interaction_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    is_active             BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- Per-chat watchlist, built via the bot's /watch and /unwatch commands.
+CREATE TABLE IF NOT EXISTS telegram_watchlist (
+    chat_id       BIGINT NOT NULL REFERENCES telegram_chats(chat_id),
+    instrument_id BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    added_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (chat_id, instrument_id)
+);
+
+-- The anti-spam mechanism: TelegramAlertsJob only messages a chat about a
+-- watched stock when short_term_action/long_term_action actually changed
+-- since the last alert. The composite FK (with ON DELETE CASCADE) to
+-- telegram_watchlist means /unwatch only has to delete that one row —
+-- Postgres removes the matching alert-state row atomically, even on a
+-- mid-request crash, rather than relying on application code to remember
+-- to delete both.
+CREATE TABLE IF NOT EXISTS telegram_watchlist_alert_state (
+    chat_id                  BIGINT NOT NULL,
+    instrument_id            BIGINT NOT NULL,
+    last_short_term_action   TEXT,
+    last_long_term_action    TEXT,
+    last_alerted_date        DATE,
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (chat_id, instrument_id),
+    FOREIGN KEY (chat_id, instrument_id) REFERENCES telegram_watchlist(chat_id, instrument_id) ON DELETE CASCADE
+);
+
+-- Outbound analog of ingestion_log — an audit trail of every Telegram
+-- message actually sent, so the dashboard can verify what went out without
+-- needing Telegram's own chat history. instrument_id is NULL for a DIGEST
+-- message (it spans many instruments in one message).
+CREATE TABLE IF NOT EXISTS telegram_alert_log (
+    alert_id         BIGSERIAL PRIMARY KEY,
+    chat_id          BIGINT NOT NULL REFERENCES telegram_chats(chat_id),
+    alert_scope      TEXT NOT NULL CHECK (alert_scope IN ('WATCHLIST','DIGEST')),
+    instrument_id    BIGINT REFERENCES instruments(instrument_id),
+    as_of_date       DATE NOT NULL,
+    message_text     TEXT NOT NULL,
+    delivery_status  TEXT NOT NULL CHECK (delivery_status IN ('SENT','FAILED')),
+    error            TEXT,
+    sent_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_alert_log_chat ON telegram_alert_log (chat_id, sent_at DESC);

@@ -20,14 +20,17 @@ from .jobs.fno_signals import FnoSignalsJob
 from .jobs.fundamental_ratios import FundamentalRatiosJob
 from .jobs.index_eod import IndexEodJob
 from .jobs.index_rebalancing import IndexRebalancingScheduleJob
+from .jobs.industry_classification import IndustryClassificationJob
 from .jobs.ipo_listings import IpoListingsJob
 from .jobs.nse_announcements import NseAnnouncementsJob
+from .jobs.recommendation_engine import RecommendationEngineJob
 from .jobs.reddit_sentiment import RedditSentimentJob
 from .jobs.relative_strength import RelativeStrengthJob
 from .jobs.rss_news import RssNewsJob
 from .jobs.shareholding_pattern import ShareholdingPatternJob
 from .jobs.signal_events import SignalEventsJob
 from .jobs.technical_indicators import TechnicalIndicatorsJob
+from .jobs.telegram_alerts import TelegramAlertsJob
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +116,18 @@ def _run_daily_events_jobs():
 
 def _run_monthly_index_rebalancing():
     _run_jobs(IndexRebalancingScheduleJob())
+
+
+def _run_monthly_industry_classification():
+    _run_jobs(IndustryClassificationJob())
+
+
+def _run_daily_recommendation_jobs():
+    # RecommendationEngineJob reads the day's technicals (16:00), consensus
+    # (17:00), momentum/F&O (17:15), and fundamentals (18:30) — scheduled
+    # after all of those daily slots. TelegramAlertsJob reads
+    # stock_recommendations, so it must follow in this same run.
+    _run_jobs(RecommendationEngineJob(), TelegramAlertsJob())
 
 
 def build_scheduler() -> BlockingScheduler:
@@ -253,6 +268,33 @@ def build_scheduler() -> BlockingScheduler:
         hour=9,
         minute=0,
         id="monthly_index_rebalancing",
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    # 1st of the month, 08:30 IST — sector/industry classification from NSE
+    # Indices' sectoral-index constituent CSVs. Same rare-refresh cadence as
+    # monthly_index_rebalancing above (30 min earlier so a same-morning
+    # backfill run has fresh sector data if anything downstream ever wants
+    # it, though nothing today reads instruments.sector same-day).
+    scheduler.add_job(
+        _run_monthly_industry_classification,
+        "cron",
+        day=1,
+        hour=8,
+        minute=30,
+        id="monthly_industry_classification",
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    # 21:00 IST — Domain 8 recommendation recompute + Telegram push, after
+    # every other daily slot above (19:00 events is the latest) has had time
+    # to finish.
+    scheduler.add_job(
+        _run_daily_recommendation_jobs,
+        "cron",
+        hour=21,
+        minute=0,
+        id="daily_recommendation_ingest",
         coalesce=True,
         misfire_grace_time=3600,
     )

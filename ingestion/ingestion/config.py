@@ -20,6 +20,15 @@ class Config:
     REDDIT_CLIENT_SECRET = os.environ.get("REDDIT_CLIENT_SECRET")
     REDDIT_USER_AGENT = os.environ.get("REDDIT_USER_AGENT", "trading-data-pipeline/1.0")
 
+    # Optional: a bot token from @BotFather (api.telegram.org/bot<token>/...).
+    # Left unset, TelegramAlertsJob and telegram_listener.py both log a clear
+    # error and no-op rather than crashing at import — same graceful-
+    # degradation pattern as REDDIT_CLIENT_ID above. Deliberately no
+    # TELEGRAM_CHAT_ID: the broadcast audience is entirely DB-driven
+    # (telegram_chats, populated as chats message the bot), never a single
+    # hardcoded chat, since multi-user support is a requirement from day one.
+    TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+
     HTTP_USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"

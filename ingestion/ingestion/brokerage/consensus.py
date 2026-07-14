@@ -5,10 +5,7 @@ separation as fundamentals/ratios.py)."""
 
 from collections import Counter
 
-# Most bullish first — used both to tie-break compute_consensus_bucket and as
-# the CHECK constraint's valid value set (brokerage_calls.rating_bucket /
-# consensus_ratings.consensus_rating_bucket).
-_BUCKET_ORDER = ["STRONG_BUY", "BUY", "HOLD", "SELL", "STRONG_SELL"]
+from ..rating_vocabulary import BUCKET_ORDER
 
 
 def compute_consensus_bucket(rating_buckets: list[str]) -> str | None:
@@ -26,4 +23,4 @@ def compute_consensus_bucket(rating_buckets: list[str]) -> str | None:
     counts = Counter(buckets)
     max_count = max(counts.values())
     tied = [b for b in counts if counts[b] == max_count]
-    return min(tied, key=lambda b: _BUCKET_ORDER.index(b))
+    return min(tied, key=lambda b: BUCKET_ORDER.index(b))

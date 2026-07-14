@@ -20,14 +20,17 @@ from .jobs.fno_signals import FnoSignalsJob
 from .jobs.fundamental_ratios import FundamentalRatiosJob
 from .jobs.index_eod import IndexEodJob
 from .jobs.index_rebalancing import IndexRebalancingScheduleJob
+from .jobs.industry_classification import IndustryClassificationJob
 from .jobs.ipo_listings import IpoListingsJob
 from .jobs.nse_announcements import NseAnnouncementsJob
+from .jobs.recommendation_engine import RecommendationEngineJob
 from .jobs.reddit_sentiment import RedditSentimentJob
 from .jobs.relative_strength import RelativeStrengthJob
 from .jobs.rss_news import RssNewsJob
 from .jobs.shareholding_pattern import ShareholdingPatternJob
 from .jobs.signal_events import SignalEventsJob
 from .jobs.technical_indicators import TechnicalIndicatorsJob
+from .jobs.telegram_alerts import TelegramAlertsJob
 from .upsert_events import upsert_macro_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -68,6 +71,17 @@ _MOMENTUM_JOBS = [
 # purely because they're all Domain 7 "corporate events & calendar" data.
 _EVENTS_JOBS = [CorporateCalendarJob, IpoListingsJob, IndexRebalancingScheduleJob]
 
+# recommendation_engine reads (among other things) instruments.sector, so it
+# runs after industry_classification here — though in practice the two are
+# on unrelated schedules in scheduler.py (industry_classification is a rare
+# monthly refresh; recommendation_engine is a daily recompute), this group
+# only exists as a convenient bundle for manual backfills.
+_RECOMMENDATION_JOBS = [IndustryClassificationJob, RecommendationEngineJob]
+
+# TelegramAlertsJob reads stock_recommendations, so it must follow
+# recommendation_engine in a manual/backfill run of this group.
+_TELEGRAM_JOBS = [TelegramAlertsJob]
+
 _JOBS = {
     "equity": [EquityEodJob],
     "index": [IndexEodJob],
@@ -78,6 +92,8 @@ _JOBS = {
     "brokerage": _BROKERAGE_JOBS,
     "momentum": _MOMENTUM_JOBS,
     "events": _EVENTS_JOBS,
+    "recommendations": _RECOMMENDATION_JOBS,
+    "telegram": _TELEGRAM_JOBS,
     "all": [
         EquityEodJob,
         IndexEodJob,
@@ -88,6 +104,8 @@ _JOBS = {
         *_BROKERAGE_JOBS,
         *_MOMENTUM_JOBS,
         *_EVENTS_JOBS,
+        *_RECOMMENDATION_JOBS,
+        *_TELEGRAM_JOBS,
     ],
 }
 

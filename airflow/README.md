@@ -1,6 +1,6 @@
 # Airflow orchestration
 
-Replaces `scheduler.py`'s single APScheduler process with 11 Airflow DAGs
+Replaces `scheduler.py`'s single APScheduler process with 13 Airflow DAGs
 (one per cron entry in `scheduler.py` — see
 [`docs/PROJECT_STATUS.md`](../docs/PROJECT_STATUS.md)'s schedule table),
 giving per-task retries, a Gantt/graph view, and per-run history instead of
@@ -106,4 +106,4 @@ other's call becomes a cheap `SKIPPED`. That makes a gradual, DAG-by-DAG
 cutover safe: unpause one DAG, watch it succeed for a few days, then
 remove its corresponding `scheduler.add_job(...)` call from
 `ingestion/ingestion/scheduler.py`. Don't remove `scheduler.py` entirely
-until every one of the 11 DAGs has been cut over.
+until every one of the 13 DAGs has been cut over.

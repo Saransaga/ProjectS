@@ -48,6 +48,36 @@ def upsert_instrument(
         return cur.fetchone()[0]
 
 
+def bulk_upsert_sector_classification(conn, rows: list[dict]) -> int:
+    """Each row: symbol, sector. Updates instruments.sector for existing NSE
+    equities only — this never inserts a new instruments row (a sectoral
+    index constituent that isn't already tracked has no instrument_id to
+    attach to), matching IndustryClassificationJob's job: classify what's
+    already there, not discover new symbols. Returns the number of
+    instruments rows actually matched (a constituent symbol not present in
+    `instruments` yet is silently skipped by the join below, not an error —
+    every equity NSE actually trades is expected to already exist there via
+    EquityEodJob)."""
+    if not rows:
+        return 0
+
+    values = [(r["symbol"], r["sector"]) for r in rows]
+
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            UPDATE instruments AS i SET
+                sector = v.sector,
+                updated_at = now()
+            FROM (VALUES %s) AS v(symbol, sector)
+            WHERE i.exchange = 'NSE' AND i.instrument_type = 'EQUITY' AND i.symbol = v.symbol
+            """,
+            values,
+        )
+        return cur.rowcount
+
+
 def bulk_upsert_ohlcv(conn, rows: list[dict]) -> int:
     """Each row: instrument_id, trade_date, open, high, low, close, prev_close,
     volume, turnover, trades, source (delivery_qty/delivery_pct not populated

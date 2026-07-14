@@ -5,6 +5,7 @@ from datetime import date
 from .. import moneycontrol_client
 from ..brokerage.classify import classify_rating
 from ..db import get_conn
+from ..rating_vocabulary import BUCKET_ORDER
 from ..upsert_brokerage import bulk_upsert_brokerage_calls, bulk_upsert_rating_change_events
 from .base import BaseJob
 
@@ -13,11 +14,11 @@ logger = logging.getLogger(__name__)
 _INTER_SYMBOL_DELAY_SECONDS = 0.3
 _SOURCE = "MONEYCONTROL"
 
-# Most bullish first — ranks a rating_bucket for UPGRADE/DOWNGRADE detection.
-# Moving toward STRONG_BUY is an upgrade, moving toward STRONG_SELL is a
-# downgrade (see brokerage/consensus.py's _BUCKET_ORDER for the same ordering
-# used by the downstream consensus job).
-_RATING_RANK = {"STRONG_SELL": 0, "SELL": 1, "HOLD": 2, "BUY": 3, "STRONG_BUY": 4}
+# Ranks a rating_bucket for UPGRADE/DOWNGRADE detection: moving toward
+# STRONG_BUY is an upgrade, moving toward STRONG_SELL is a downgrade.
+# BUCKET_ORDER is most-bullish-first, so rank = reverse index into it —
+# same shared vocabulary rating_vocabulary.py's other consumers use.
+_RATING_RANK = {bucket: len(BUCKET_ORDER) - 1 - i for i, bucket in enumerate(BUCKET_ORDER)}
 
 
 class BrokerageCallsJob(BaseJob):
