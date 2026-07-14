@@ -110,6 +110,40 @@ def _corporate_actions_signal(detail: dict) -> str:
     return f"Corporate actions (12mo): {', '.join(types)}" if types else "No corporate actions in the last 12 months"
 
 
+def _news_sentiment(detail: dict) -> str:
+    count = detail.get("headline_count", 0)
+    if count == 0:
+        return "News: no recent headlines"
+    if "avg_sentiment" not in detail:
+        return f"News: {count} recent headline(s), none with a scored sentiment"
+    tone = "positive" if detail["avg_sentiment"] > 0.15 else "negative" if detail["avg_sentiment"] < -0.15 else "mixed/neutral"
+    breaking = f", {detail['breaking_count']} breaking" if detail.get("breaking_count") else ""
+    return f"News: {count} recent headline(s), {tone} tone{breaking}"
+
+
+def _bulk_block_deals(detail: dict) -> str:
+    count = detail.get("deal_count", 0)
+    if count == 0:
+        return "No bulk/block deals recently"
+    if "net_ratio" not in detail:
+        return f"{count} bulk/block deal(s) recently, no net quantity"
+    lean = "buy-side" if detail["net_ratio"] > 0.1 else "sell-side" if detail["net_ratio"] < -0.1 else "balanced"
+    return f"Bulk/block deals: {count} recently, {lean}"
+
+
+def _fii_dii_market_flow(detail: dict) -> str:
+    if "reason" in detail:
+        return "FII/DII flow: " + detail["reason"]
+    net = detail["net_value_cr"]
+    direction = "net inflow" if net > 0 else "net outflow" if net < 0 else "flat"
+    return f"Market-wide FII/DII {direction}: {net:+.0f} cr"
+
+
+def _upcoming_corporate_events(detail: dict) -> str:
+    types = detail.get("event_types") or []
+    return f"Upcoming corporate events: {', '.join(types)}" if types else "No upcoming corporate events on record"
+
+
 _RENDERERS = {
     "trend_stack": _trend_stack,
     "rsi_zone": _rsi_zone,
@@ -124,6 +158,10 @@ _RENDERERS = {
     "shareholding_trend": _shareholding_trend,
     "consensus_signal": _consensus_signal,
     "corporate_actions_signal": _corporate_actions_signal,
+    "news_sentiment": _news_sentiment,
+    "bulk_block_deals": _bulk_block_deals,
+    "fii_dii_market_flow": _fii_dii_market_flow,
+    "upcoming_corporate_events": _upcoming_corporate_events,
 }
 
 

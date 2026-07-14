@@ -1,11 +1,13 @@
 """Short-term (technical/momentum) composite scoring — pure functions, no
 I/O. jobs/recommendation_engine.py owns fetching per-instrument data from
 technical_indicators_daily/signal_events/relative_strength/fno_oi_buildup
-and shaping it into the `inputs` dict score_short_term() expects; see
-recommendation/aggregate.py for the shared NULL-vs-0 weighted-average
-discipline every component below follows: return None only when the source
-data genuinely doesn't exist for this instrument, 0.0 when it exists but
-found nothing notable.
+(Domains 1/2/6) plus news_items (Domain 4), bulk_block_deals/
+fii_dii_cash_flows (Domain 6) and corporate_calendar (Domain 7), shaping it
+into the `inputs` dict score_short_term() expects; see recommendation/
+aggregate.py for the shared NULL-vs-0 weighted-average discipline every
+component below follows: return None only when the source data genuinely
+doesn't exist for this instrument, 0.0 when it exists but found nothing
+notable.
 
 All numeric inputs are expected as plain floats, already cast from
 psycopg2's Decimal — this package deliberately does no DB I/O and no
@@ -15,14 +17,23 @@ though not on comparison), so the job layer casts at the boundary.
 
 from .aggregate import ComponentResult, aggregate_components
 
+# The original 7 technical/momentum weights are scaled down (x0.7, same
+# relative proportions) to make room for 4 new Domain 4/6/7 components below
+# — see this domain's plan doc for why short-term (not long-term) is where
+# news/bulk-deals/FII-DII/upcoming-events land: all four are short-horizon
+# price catalysts, not structural fundamentals.
 WEIGHTS = {
-    "trend_stack": 0.20,
-    "rsi_zone": 0.10,
-    "macd_momentum": 0.15,
-    "signal_events_recency": 0.20,
-    "proximity_52w": 0.10,
-    "relative_strength_short": 0.15,
-    "fno_positioning": 0.10,
+    "trend_stack": 0.14,
+    "rsi_zone": 0.07,
+    "macd_momentum": 0.10,
+    "signal_events_recency": 0.14,
+    "proximity_52w": 0.07,
+    "relative_strength_short": 0.10,
+    "fno_positioning": 0.07,
+    "news_sentiment": 0.10,
+    "bulk_block_deals": 0.08,
+    "fii_dii_market_flow": 0.06,
+    "upcoming_corporate_events": 0.07,
 }
 assert abs(sum(WEIGHTS.values()) - 1.0) < 1e-9
 
@@ -162,12 +173,106 @@ def _fno_positioning(
     return max(-2.0, min(2.0, score)), {"buildup_type": buildup_type, "pcr_oi": pcr_oi}
 
 
+_NEWS_RECENT_DAYS = 2  # full weight within this window, half weight out to the job's full lookback
+
+
+def _news_sentiment(news_items: list[dict]) -> tuple[float, dict]:
+    """news_items: [{"sentiment_score" (-1..1|None), "relevance_score" (0..1),
+    "source_credibility_weight", "urgency", "days_ago"}, ...] for this
+    instrument in the job's lookback window (see
+    RecommendationEngineJob._fetch_news). Always a real 0.0 (never None)
+    when empty or nothing has a scored sentiment — "no notable news" is
+    itself a valid observation (same convention as signal_events_recency),
+    not missing data; Domain 4's keyword-lexicon sentiment is a real, if
+    coarse, per-article score, not a guess."""
+    if not news_items:
+        return 0.0, {"headline_count": 0}
+
+    weighted_sum, total_weight, breaking_count = 0.0, 0.0, 0
+    for item in news_items:
+        if item.get("urgency") == "BREAKING":
+            breaking_count += 1
+        if item.get("sentiment_score") is None:
+            continue
+        decay = 1.0 if item["days_ago"] <= _NEWS_RECENT_DAYS else 0.5
+        w = (item.get("relevance_score") or 0.5) * (item.get("source_credibility_weight") or 0.5) * decay
+        weighted_sum += item["sentiment_score"] * w
+        total_weight += w
+
+    detail = {"headline_count": len(news_items), "breaking_count": breaking_count}
+    if total_weight == 0:
+        return 0.0, {**detail, "reason": "no scored sentiment among these headlines"}
+
+    avg_sentiment = weighted_sum / total_weight  # -1..1
+    detail["avg_sentiment"] = avg_sentiment
+    return max(-2.0, min(2.0, avg_sentiment * 2)), detail
+
+
+def _bulk_block_deals(deals: list[dict]) -> tuple[float, dict]:
+    """deals: [{"buy_sell", "quantity"}, ...] for this instrument in the
+    job's lookback window (see RecommendationEngineJob._fetch_bulk_block_deals).
+    Always a real 0.0 when empty — most instruments have no bulk/block deal
+    on most days, that's the normal case, not missing data."""
+    if not deals:
+        return 0.0, {"deal_count": 0}
+
+    buy_qty = sum(d["quantity"] for d in deals if d["buy_sell"] == "BUY")
+    sell_qty = sum(d["quantity"] for d in deals if d["buy_sell"] == "SELL")
+    total_qty = buy_qty + sell_qty
+    if total_qty == 0:
+        return 0.0, {"deal_count": len(deals)}
+
+    net_ratio = (buy_qty - sell_qty) / total_qty  # -1 (all sell) .. 1 (all buy)
+    return max(-2.0, min(2.0, net_ratio * 2)), {
+        "deal_count": len(deals), "buy_qty": buy_qty, "sell_qty": sell_qty, "net_ratio": net_ratio,
+    }
+
+
+def _fii_dii_market_flow(net_value_cr: float | None) -> tuple[float | None, dict]:
+    """net_value_cr: combined FII+DII cash-segment net buy(+)/sell(-) value in
+    crores for the most recent flow_date on or before run_date — the same
+    market-wide value for every instrument that day (fii_dii_cash_flows is a
+    market aggregate, not per-instrument; see RecommendationEngineJob's
+    single fetch shared across the whole universe). None only when no
+    fii_dii_cash_flows row exists yet for/before this date at all."""
+    if net_value_cr is None:
+        return None, {"reason": "no fii_dii_cash_flows row on or before this date"}
+    if net_value_cr > 3000:
+        score = 1.5
+    elif net_value_cr > 500:
+        score = 0.75
+    elif net_value_cr > -500:
+        score = 0.0
+    elif net_value_cr > -3000:
+        score = -0.75
+    else:
+        score = -1.5
+    return score, {"net_value_cr": net_value_cr}
+
+
+def _upcoming_corporate_events(events: list[dict]) -> tuple[float, dict]:
+    """events: [{"event_type"}, ...] from corporate_calendar in the job's
+    forward-looking window (see
+    RecommendationEngineJob._fetch_upcoming_corporate_events) — a forward
+    counterpart to long_term.py's _corporate_actions_signal (which looks
+    *backward* at corporate_actions' already-happened ex-dates); same point
+    convention, applied to what's *scheduled* instead. EARNINGS/AGM/EGM/
+    OTHER carry no inherent direction and score 0 individually (an upcoming
+    earnings date is a volatility flag, not a buy/sell signal — deliberately
+    not fabricated as one). Always a real 0.0 when empty."""
+    _POINTS = {"BUYBACK": 1.0, "BONUS": 0.5, "RIGHTS": -1.0}
+    total = sum(_POINTS.get(e["event_type"], 0.0) for e in events)
+    return max(-2.0, min(2.0, total)), {"event_types": [e["event_type"] for e in events]}
+
+
 def score_short_term(inputs: dict) -> dict:
     """inputs keys: technical_indicators (dict|None), macd_hist_prev
     (float|None), trend_events (list[dict]), near_52w_high (bool),
     near_52w_low (bool), rs_rating (float|None), return_1w (float|None),
     return_1m (float|None), has_fno (bool), fno_buildup_type (str|None),
-    fno_pcr_oi (float|None). Returns the aggregate.py rationale dict."""
+    fno_pcr_oi (float|None), news_items (list[dict]), bulk_block_deals
+    (list[dict]), fii_dii_net_value_cr (float|None), upcoming_corporate_events
+    (list[dict]). Returns the aggregate.py rationale dict."""
     indicators = inputs.get("technical_indicators")
     trend_score, trend_detail = _trend_stack(indicators)
     rsi_score, rsi_detail = _rsi_zone((indicators or {}).get("rsi_14"))
@@ -184,6 +289,12 @@ def score_short_term(inputs: dict) -> dict:
     fno_score, fno_detail = _fno_positioning(
         inputs.get("has_fno", False), inputs.get("fno_buildup_type"), inputs.get("fno_pcr_oi")
     )
+    news_score, news_detail = _news_sentiment(inputs.get("news_items", []))
+    deals_score, deals_detail = _bulk_block_deals(inputs.get("bulk_block_deals", []))
+    fii_dii_score, fii_dii_detail = _fii_dii_market_flow(inputs.get("fii_dii_net_value_cr"))
+    events_upcoming_score, events_upcoming_detail = _upcoming_corporate_events(
+        inputs.get("upcoming_corporate_events", [])
+    )
 
     components = [
         ComponentResult("trend_stack", trend_score, WEIGHTS["trend_stack"], trend_detail),
@@ -195,5 +306,17 @@ def score_short_term(inputs: dict) -> dict:
             "relative_strength_short", rs_score, WEIGHTS["relative_strength_short"], rs_detail
         ),
         ComponentResult("fno_positioning", fno_score, WEIGHTS["fno_positioning"], fno_detail),
+        ComponentResult("news_sentiment", news_score, WEIGHTS["news_sentiment"], news_detail),
+        ComponentResult("bulk_block_deals", deals_score, WEIGHTS["bulk_block_deals"], deals_detail),
+        ComponentResult(
+            "fii_dii_market_flow", fii_dii_score, WEIGHTS["fii_dii_market_flow"], fii_dii_detail,
+            counts_toward_gate=False,
+        ),
+        ComponentResult(
+            "upcoming_corporate_events",
+            events_upcoming_score,
+            WEIGHTS["upcoming_corporate_events"],
+            events_upcoming_detail,
+        ),
     ]
     return aggregate_components(components)

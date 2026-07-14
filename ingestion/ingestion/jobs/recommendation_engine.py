@@ -32,6 +32,9 @@ _SIGNAL_EVENTS_WINDOW_DAYS = 10
 _PROXIMITY_WINDOW_DAYS = 5
 _CORPORATE_ACTIONS_WINDOW_DAYS = 365
 _FUNDAMENTALS_LOOKBACK_QUARTERS = 6
+_NEWS_WINDOW_DAYS = 5  # Domain 4: news_items has no fixed cadence, unlike the daily EOD tables above
+_BULK_BLOCK_DEALS_WINDOW_DAYS = 10  # Domain 6: same window as signal_events_recency's trend events
+_UPCOMING_EVENTS_WINDOW_DAYS = 30  # Domain 7: forward-looking, unlike every other _WINDOW_DAYS above
 
 
 def _f(value) -> float | None:
@@ -64,11 +67,16 @@ class RecommendationEngineJob(BaseJob):
             shareholding = self._fetch_shareholding(conn, run_date)
             consensus = self._fetch_consensus(conn, run_date)
             corp_actions = self._fetch_corporate_actions(conn, run_date)
+            news = self._fetch_news(conn, run_date)
+            bulk_block_deals = self._fetch_bulk_block_deals(conn, run_date)
+            fii_dii_net_value_cr = self._fetch_fii_dii_flow(conn, run_date)
+            upcoming_events = self._fetch_upcoming_corporate_events(conn, run_date)
 
         rows = []
         for instrument_id, symbol in universe:
             short_inputs = self._build_short_term_inputs(
-                instrument_id, symbol, technicals, events, rel_strength, fno_buildup, fno_pcr
+                instrument_id, symbol, technicals, events, rel_strength, fno_buildup, fno_pcr,
+                news, bulk_block_deals, fii_dii_net_value_cr, upcoming_events,
             )
             long_inputs = self._build_long_term_inputs(
                 instrument_id, fundamentals, pe_ratios, shareholding, consensus, corp_actions, rel_strength
@@ -294,11 +302,88 @@ class RecommendationEngineJob(BaseJob):
                 by_instrument[instrument_id].append(action_type)
             return dict(by_instrument)
 
+    def _fetch_news(self, conn, run_date: date) -> dict[int, list[dict]]:
+        """Domain 4: news_items joined through news_item_tickers (a company
+        story can name several instruments, hence the many-to-many join
+        rather than a direct instrument_id column on news_items)."""
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT nit.instrument_id, ni.sentiment_score, ni.relevance_score,
+                       ni.source_credibility_weight, ni.urgency, ni.published_at
+                FROM news_item_tickers nit
+                JOIN news_items ni ON ni.news_item_id = nit.news_item_id
+                WHERE ni.published_at IS NOT NULL
+                  AND ni.published_at::date BETWEEN %s AND %s
+                """,
+                (run_date - timedelta(days=_NEWS_WINDOW_DAYS), run_date),
+            )
+            by_instrument = defaultdict(list)
+            for instrument_id, sentiment_score, relevance_score, credibility, urgency, published_at in cur.fetchall():
+                by_instrument[instrument_id].append({
+                    "sentiment_score": _f(sentiment_score),
+                    "relevance_score": _f(relevance_score),
+                    "source_credibility_weight": _f(credibility),
+                    "urgency": urgency,
+                    "days_ago": (run_date - published_at.date()).days,
+                })
+            return dict(by_instrument)
+
+    def _fetch_bulk_block_deals(self, conn, run_date: date) -> dict[int, list[dict]]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, buy_sell, quantity
+                FROM bulk_block_deals
+                WHERE deal_date BETWEEN %s AND %s
+                """,
+                (run_date - timedelta(days=_BULK_BLOCK_DEALS_WINDOW_DAYS), run_date),
+            )
+            by_instrument = defaultdict(list)
+            for instrument_id, buy_sell, quantity in cur.fetchall():
+                by_instrument[instrument_id].append({"buy_sell": buy_sell, "quantity": quantity})
+            return dict(by_instrument)
+
+    def _fetch_fii_dii_flow(self, conn, run_date: date) -> float | None:
+        """Domain 6: fii_dii_cash_flows is a market-wide daily figure (one
+        row per category per date, not per instrument) — combines FII+DII
+        net_value_cr for the most recent flow_date on or before run_date
+        into a single value every instrument's short-term score shares."""
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT sum(net_value_cr) FROM fii_dii_cash_flows
+                WHERE flow_date = (SELECT max(flow_date) FROM fii_dii_cash_flows WHERE flow_date <= %s)
+                """,
+                (run_date,),
+            )
+            row = cur.fetchone()
+            return _f(row[0]) if row else None
+
+    def _fetch_upcoming_corporate_events(self, conn, run_date: date) -> dict[int, list[dict]]:
+        """Domain 7: corporate_calendar, forward-looking (event_date >=
+        run_date) — the counterpart to _fetch_corporate_actions above, which
+        looks backward at corporate_actions' already-happened ex-dates."""
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT instrument_id, event_type
+                FROM corporate_calendar
+                WHERE event_date BETWEEN %s AND %s
+                """,
+                (run_date, run_date + timedelta(days=_UPCOMING_EVENTS_WINDOW_DAYS)),
+            )
+            by_instrument = defaultdict(list)
+            for instrument_id, event_type in cur.fetchall():
+                by_instrument[instrument_id].append({"event_type": event_type})
+            return dict(by_instrument)
+
     # -- per-instrument input shaping for recommendation/short_term.py and
     # recommendation/long_term.py -----------------------------------------
 
     def _build_short_term_inputs(
-        self, instrument_id, symbol, technicals, events, rel_strength, fno_buildup, fno_pcr
+        self, instrument_id, symbol, technicals, events, rel_strength, fno_buildup, fno_pcr,
+        news, bulk_block_deals, fii_dii_net_value_cr, upcoming_events,
     ) -> dict:
         rows = technicals.get(instrument_id, [])
         latest = rows[0] if rows else None
@@ -331,6 +416,10 @@ class RecommendationEngineJob(BaseJob):
             "has_fno": buildup is not None or pcr is not None,
             "fno_buildup_type": buildup["buildup_type"] if buildup else None,
             "fno_pcr_oi": pcr["pcr_oi"] if pcr else None,
+            "news_items": news.get(instrument_id, []),
+            "bulk_block_deals": bulk_block_deals.get(instrument_id, []),
+            "fii_dii_net_value_cr": fii_dii_net_value_cr,
+            "upcoming_corporate_events": upcoming_events.get(instrument_id, []),
         }
 
     def _build_long_term_inputs(
