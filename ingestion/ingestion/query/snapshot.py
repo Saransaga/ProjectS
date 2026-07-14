@@ -50,11 +50,22 @@ def latest_recommendation_date(conn):
 def price_levels(conn, instrument_id: int, close: float | None) -> dict | None:
     """Nearest support_resistance_levels rows flanking `close` — the
     strongest (highest pivot touch-count) resistance strictly above and
-    support strictly below. None when there's no close to anchor against.
-    The table is fully replaced per instrument on every signal_events run
-    (see init.sql's Domain 2 section), so every row currently on file for
-    this instrument is already "as of the latest run" — no date filter
-    needed."""
+    support strictly below — plus the instrument's own latest ATR(14)
+    (technical_indicators_daily.atr_14, its recent average daily trading
+    range). None when there's no close to anchor against. The
+    support_resistance_levels table is fully replaced per instrument on
+    every signal_events run (see init.sql's Domain 2 section), so every row
+    currently on file for this instrument is already "as of the latest
+    run" — no date filter needed there.
+
+    ATR is handed to telegram_bot/formatting.py for two things it cannot do
+    without real data: (1) a stock breaking out to a new high has no
+    resistance level recorded above it yet (nothing has traded there
+    before) — formatting.py falls back to an ATR-multiple price projection
+    in that case, clearly labeled as a projection, never presented as an
+    observed level; (2) a "how many trading days at the recent pace" rough
+    estimate for reaching a target — explicitly a pace, not a forecast of
+    if/when a level will actually be hit."""
     if close is None:
         return None
     with conn.cursor() as cur:
@@ -77,7 +88,18 @@ def price_levels(conn, instrument_id: int, close: float | None) -> dict | None:
                 resistance_above = level
             else:
                 support_below = level
-    return {"close": close, "resistance_above": resistance_above, "support_below": support_below}
+
+        cur.execute(
+            "SELECT atr_14 FROM technical_indicators_daily WHERE instrument_id = %s "
+            "ORDER BY trade_date DESC LIMIT 1",
+            (instrument_id,),
+        )
+        row = cur.fetchone()
+        atr_14 = float(row[0]) if row and row[0] is not None else None
+
+    return {
+        "close": close, "resistance_above": resistance_above, "support_below": support_below, "atr_14": atr_14,
+    }
 
 
 def latest_close(conn, instrument_id: int) -> dict | None:
