@@ -1,5 +1,5 @@
 """Dispatches one inbound Telegram update to a reply — /start, /help,
-/watch, /unwatch, /list, /recommend, or bare free text treated as a
+/watch, /unwatch, /list, /recommend, /top, or bare free text treated as a
 symbol/company lookup (the common case: a user just types "TCS" or
 "reliance"). Every handler returns the reply text; handle_update owns the
 actual send_message call so a delivery failure (bot blocked, HTTP 403) is
@@ -10,9 +10,17 @@ import logging
 
 from .. import telegram_client
 from ..query.resolve import AmbiguousQueryError, resolve
-from ..query.snapshot import latest_close, latest_recommendation
+from ..query.snapshot import (
+    latest_close,
+    latest_recommendation,
+    latest_recommendation_date,
+    price_levels,
+    top_movers,
+)
 from ..upsert_telegram import add_watch, list_watchlist, mark_chat_inactive, remove_watch, upsert_chat
-from .formatting import format_ambiguous, format_help, format_recommendation, format_watchlist
+from .formatting import format_ambiguous, format_help, format_recommendation, format_top_buys, format_watchlist
+
+_TOP_N = 5
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +56,8 @@ def _dispatch(conn, chat_id: int, text: str) -> str:
         return format_watchlist(list_watchlist(conn, chat_id))
     if text.startswith("/recommend"):
         return _handle_recommend(conn, text[len("/recommend"):].strip())
+    if text.startswith("/top"):
+        return _handle_top(conn)
     return _handle_recommend(conn, text)  # bare text: treat as a lookup
 
 
@@ -69,7 +79,19 @@ def _handle_recommend(conn, query: str) -> str:
         return error
     rec = latest_recommendation(conn, match["instrument_id"])
     close = latest_close(conn, match["instrument_id"])
-    return format_recommendation(match, rec, close)
+    levels = price_levels(conn, match["instrument_id"], close["close"] if close else None)
+    return format_recommendation(match, rec, close, levels)
+
+
+def _handle_top(conn) -> str:
+    as_of_date = latest_recommendation_date(conn)
+    if as_of_date is None:
+        return "No recommendations computed yet — check back after the next daily run."
+    entries = top_movers(conn, as_of_date, "short", "buy", limit=_TOP_N)
+    for entry in entries:
+        close = latest_close(conn, entry["instrument_id"])
+        entry["levels"] = price_levels(conn, entry["instrument_id"], close["close"] if close else None)
+    return format_top_buys(as_of_date, entries)
 
 
 def _handle_watch(conn, chat_id: int, query: str) -> str:

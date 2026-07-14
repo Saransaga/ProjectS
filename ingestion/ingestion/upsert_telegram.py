@@ -86,13 +86,15 @@ def get_watchlist_alert_candidates(conn, as_of_date) -> list[dict]:
     """One row per (active chat, watched instrument) that has a
     stock_recommendations row for as_of_date — includes the last-alerted
     action (NULL if never alerted) so the caller (TelegramAlertsJob) can
-    decide whether anything actually changed."""
+    decide whether anything actually changed, plus each rationale JSONB so
+    the alert message can show the same target/exit levels + top reasons
+    /recommend does (see telegram_bot/formatting.format_recommendation)."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT tw.chat_id, tw.instrument_id, i.symbol, i.name,
-                   r.short_term_score, r.short_term_action,
-                   r.long_term_score, r.long_term_action,
+                   r.short_term_score, r.short_term_action, r.short_term_rationale,
+                   r.long_term_score, r.long_term_action, r.long_term_rationale,
                    tas.last_short_term_action, tas.last_long_term_action
             FROM telegram_watchlist tw
             JOIN telegram_chats tc ON tc.chat_id = tw.chat_id AND tc.is_active
@@ -113,14 +115,16 @@ def get_watchlist_alert_candidates(conn, as_of_date) -> list[dict]:
             "name": name,
             "short_term_score": float(s_score) if s_score is not None else None,
             "short_term_action": s_action,
+            "short_term_rationale": s_rationale,
             "long_term_score": float(l_score) if l_score is not None else None,
             "long_term_action": l_action,
+            "long_term_rationale": l_rationale,
             "last_short_term_action": last_s_action,
             "last_long_term_action": last_l_action,
         }
         for (
             chat_id, instrument_id, symbol, name,
-            s_score, s_action, l_score, l_action,
+            s_score, s_action, s_rationale, l_score, l_action, l_rationale,
             last_s_action, last_l_action,
         ) in rows
     ]

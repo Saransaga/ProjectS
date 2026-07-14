@@ -19,7 +19,7 @@ from datetime import date
 from .. import telegram_client
 from ..config import config
 from ..db import get_conn
-from ..query.snapshot import top_movers
+from ..query.snapshot import latest_close, price_levels, top_movers
 from ..telegram_bot.formatting import format_digest, format_recommendation
 from ..upsert_telegram import (
     get_active_chat_ids,
@@ -67,11 +67,17 @@ class TelegramAlertsJob(BaseJob):
                 "as_of_date": run_date,
                 "short_term_score": candidate["short_term_score"],
                 "short_term_action": candidate["short_term_action"],
+                "short_term_rationale": candidate["short_term_rationale"],
                 "long_term_score": candidate["long_term_score"],
                 "long_term_action": candidate["long_term_action"],
+                "long_term_rationale": candidate["long_term_rationale"],
             }
-            text = format_recommendation(match, rec, close=None)
-            self._deliver(conn, candidate["chat_id"], "WATCHLIST", candidate["instrument_id"], run_date, text)
+            close = latest_close(conn, candidate["instrument_id"])
+            levels = price_levels(conn, candidate["instrument_id"], close["close"] if close else None)
+            text = format_recommendation(match, rec, close, levels, show_watch_tip=False)
+            delivered = self._deliver(conn, candidate["chat_id"], "WATCHLIST", candidate["instrument_id"], run_date, text)
+            if not delivered:
+                continue  # leave alert_state untouched so a failed send is retried next run, not silently dropped
             upsert_alert_state(
                 conn,
                 candidate["chat_id"],
@@ -89,6 +95,10 @@ class TelegramAlertsJob(BaseJob):
         if not buys and not sells:
             return []
 
+        for entry in buys + sells:
+            close = latest_close(conn, entry["instrument_id"])
+            entry["levels"] = price_levels(conn, entry["instrument_id"], close["close"] if close else None)
+
         text = format_digest(run_date, buys, sells)
         sent = []
         for chat_id in get_active_chat_ids(conn):
@@ -96,12 +106,14 @@ class TelegramAlertsJob(BaseJob):
             sent.append({"chat_id": chat_id, "scope": "DIGEST"})
         return sent
 
-    def _deliver(self, conn, chat_id: int, scope: str, instrument_id: int | None, run_date: date, text: str) -> None:
+    def _deliver(self, conn, chat_id: int, scope: str, instrument_id: int | None, run_date: date, text: str) -> bool:
         try:
             telegram_client.send_message(chat_id, text)
             log_alert(conn, chat_id, scope, instrument_id, run_date, text, "SENT", None)
+            return True
         except telegram_client.TelegramApiError as exc:
             log_alert(conn, chat_id, scope, instrument_id, run_date, text, "FAILED", str(exc))
             if "403" in str(exc):
                 mark_chat_inactive(conn, chat_id)
             logger.warning("telegram_alerts: send to chat %s failed: %s", chat_id, exc)
+            return False
