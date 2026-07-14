@@ -3,12 +3,14 @@ from datetime import datetime, timedelta
 
 import click
 
+from .db import get_conn
 from .jobs.brokerage_calls import BrokerageCallsJob
 from .jobs.bse_announcements import BseAnnouncementsJob
 from .jobs.bulk_block_deals import BulkBlockDealsJob
 from .jobs.candlestick_patterns import CandlestickPatternsJob
 from .jobs.consensus_ratings import ConsensusRatingsJob
 from .jobs.corporate_actions import CorporateActionsJob
+from .jobs.corporate_calendar import CorporateCalendarJob
 from .jobs.deliverable_volume import DeliverableVolumeJob
 from .jobs.equity_eod import EquityEodJob
 from .jobs.fii_dii_flows import FiiDiiFlowsJob
@@ -17,6 +19,8 @@ from .jobs.fno_bhavcopy import FnoBhavcopyJob
 from .jobs.fno_signals import FnoSignalsJob
 from .jobs.fundamental_ratios import FundamentalRatiosJob
 from .jobs.index_eod import IndexEodJob
+from .jobs.index_rebalancing import IndexRebalancingScheduleJob
+from .jobs.ipo_listings import IpoListingsJob
 from .jobs.nse_announcements import NseAnnouncementsJob
 from .jobs.reddit_sentiment import RedditSentimentJob
 from .jobs.relative_strength import RelativeStrengthJob
@@ -24,6 +28,7 @@ from .jobs.rss_news import RssNewsJob
 from .jobs.shareholding_pattern import ShareholdingPatternJob
 from .jobs.signal_events import SignalEventsJob
 from .jobs.technical_indicators import TechnicalIndicatorsJob
+from .upsert_events import upsert_macro_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -59,6 +64,10 @@ _MOMENTUM_JOBS = [
     RelativeStrengthJob,
 ]
 
+# No interdependency between these three — bundled under one --job group
+# purely because they're all Domain 7 "corporate events & calendar" data.
+_EVENTS_JOBS = [CorporateCalendarJob, IpoListingsJob, IndexRebalancingScheduleJob]
+
 _JOBS = {
     "equity": [EquityEodJob],
     "index": [IndexEodJob],
@@ -68,6 +77,7 @@ _JOBS = {
     "news": _NEWS_JOBS,
     "brokerage": _BROKERAGE_JOBS,
     "momentum": _MOMENTUM_JOBS,
+    "events": _EVENTS_JOBS,
     "all": [
         EquityEodJob,
         IndexEodJob,
@@ -77,6 +87,7 @@ _JOBS = {
         *_NEWS_JOBS,
         *_BROKERAGE_JOBS,
         *_MOMENTUM_JOBS,
+        *_EVENTS_JOBS,
     ],
 }
 
@@ -111,6 +122,27 @@ def backfill_range(job, from_str, to_str, force):
             status = job_cls().run(d, force=force)
             click.echo(f"{job_cls.job_name} {d} -> {status}")
         d += timedelta(days=1)
+
+
+@cli.group(name="macro-event")
+def macro_event():
+    """Manual entry for macro_events — see init.sql's Domain 7 section for
+    why there's no automated job (RBI/MOSPI publish no scrapeable calendar)."""
+
+
+@macro_event.command(name="add")
+@click.option("--date", "date_str", required=True, help="YYYY-MM-DD")
+@click.option(
+    "--category",
+    required=True,
+    type=click.Choice(["RBI_MPC", "UNION_BUDGET", "CPI", "WPI", "IIP", "GDP", "OTHER"]),
+)
+@click.option("--description", required=True)
+def macro_event_add(date_str, category, description):
+    event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    with get_conn() as conn:
+        upsert_macro_event(conn, event_date, category, description)
+    click.echo(f"{category} {event_date} -> stored")
 
 
 if __name__ == "__main__":

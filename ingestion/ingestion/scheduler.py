@@ -10,6 +10,7 @@ from .jobs.bulk_block_deals import BulkBlockDealsJob
 from .jobs.candlestick_patterns import CandlestickPatternsJob
 from .jobs.consensus_ratings import ConsensusRatingsJob
 from .jobs.corporate_actions import CorporateActionsJob
+from .jobs.corporate_calendar import CorporateCalendarJob
 from .jobs.deliverable_volume import DeliverableVolumeJob
 from .jobs.equity_eod import EquityEodJob
 from .jobs.fii_dii_flows import FiiDiiFlowsJob
@@ -18,6 +19,8 @@ from .jobs.fno_bhavcopy import FnoBhavcopyJob
 from .jobs.fno_signals import FnoSignalsJob
 from .jobs.fundamental_ratios import FundamentalRatiosJob
 from .jobs.index_eod import IndexEodJob
+from .jobs.index_rebalancing import IndexRebalancingScheduleJob
+from .jobs.ipo_listings import IpoListingsJob
 from .jobs.nse_announcements import NseAnnouncementsJob
 from .jobs.reddit_sentiment import RedditSentimentJob
 from .jobs.relative_strength import RelativeStrengthJob
@@ -99,6 +102,17 @@ def _run_fii_dii_jobs():
 
 def _run_deal_window_jobs():
     _run_jobs(BulkBlockDealsJob())
+
+
+def _run_daily_events_jobs():
+    # CorporateCalendarJob/IpoListingsJob both always_force=True (NSE's feeds
+    # always serve "whatever's current"), so this is a plain daily re-poll —
+    # no ordering dependency between the two or on anything else that day.
+    _run_jobs(CorporateCalendarJob(), IpoListingsJob())
+
+
+def _run_monthly_index_rebalancing():
+    _run_jobs(IndexRebalancingScheduleJob())
 
 
 def build_scheduler() -> BlockingScheduler:
@@ -213,5 +227,33 @@ def build_scheduler() -> BlockingScheduler:
         id="bulk_block_deals_poll",
         coalesce=True,
         misfire_grace_time=1800,
+    )
+    # 19:00 IST — corporate events calendar (board-meeting-driven earnings/
+    # dividend/bonus/split/buyback/rights + AGM/EGM, and the IPO calendar +
+    # listing-day backfill), after the 18:30 fundamentals slot per the
+    # domain spec's "Updated daily; results trigger immediate re-ingestion"
+    # (board meetings are polled fresh every day, so a new/rescheduled
+    # meeting shows up the same day NSE publishes it).
+    scheduler.add_job(
+        _run_daily_events_jobs,
+        "cron",
+        hour=19,
+        minute=0,
+        id="daily_events_ingest",
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    # 1st of the month, 09:00 IST — NSE Indices' rebalancing-cadence page
+    # changes rarely; monthly is plenty (per the domain spec's "Monthly
+    # refresh" cadence for calendar-type data in this domain).
+    scheduler.add_job(
+        _run_monthly_index_rebalancing,
+        "cron",
+        day=1,
+        hour=9,
+        minute=0,
+        id="monthly_index_rebalancing",
+        coalesce=True,
+        misfire_grace_time=3600,
     )
     return scheduler

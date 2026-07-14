@@ -15,6 +15,7 @@ from ingestion.jobs.bulk_block_deals import BulkBlockDealsJob
 from ingestion.jobs.candlestick_patterns import CandlestickPatternsJob
 from ingestion.jobs.consensus_ratings import ConsensusRatingsJob
 from ingestion.jobs.corporate_actions import CorporateActionsJob
+from ingestion.jobs.corporate_calendar import CorporateCalendarJob
 from ingestion.jobs.deliverable_volume import DeliverableVolumeJob
 from ingestion.jobs.equity_eod import EquityEodJob
 from ingestion.jobs.fii_dii_flows import FiiDiiFlowsJob
@@ -23,6 +24,8 @@ from ingestion.jobs.fno_bhavcopy import FnoBhavcopyJob
 from ingestion.jobs.fno_signals import FnoSignalsJob
 from ingestion.jobs.fundamental_ratios import FundamentalRatiosJob
 from ingestion.jobs.index_eod import IndexEodJob
+from ingestion.jobs.index_rebalancing import IndexRebalancingScheduleJob
+from ingestion.jobs.ipo_listings import IpoListingsJob
 from ingestion.jobs.nse_announcements import NseAnnouncementsJob
 from ingestion.jobs.reddit_sentiment import RedditSentimentJob
 from ingestion.jobs.relative_strength import RelativeStrengthJob
@@ -55,6 +58,9 @@ JOBS = {
     "fno_signals": FnoSignalsJob,
     "deliverable_volume": DeliverableVolumeJob,
     "relative_strength": RelativeStrengthJob,
+    "corporate_calendar": CorporateCalendarJob,
+    "ipo_listings": IpoListingsJob,
+    "index_rebalancing_schedule": IndexRebalancingScheduleJob,
 }
 
 # table -> (date column to sort/filter by, symbol-filter mode: None = no
@@ -87,6 +93,10 @@ TABLES = {
     "fno_oi_buildup": ("trade_date", "underlying"),
     "fno_rollover": ("trade_date", "underlying"),
     "relative_strength": ("trade_date", "instrument"),
+    "corporate_calendar": ("event_date", "instrument"),
+    "ipo_listings": ("issue_start_date", "symbol"),
+    "index_rebalancing_schedule": ("updated_at", None),
+    "macro_events": ("event_date", None),
     "ingestion_log": ("run_date", None),
 }
 
@@ -175,6 +185,12 @@ with tab_browse:
             params.append(f"%{symbol}%")
     elif symbol_mode == "underlying" and symbol:
         sql += " WHERE t.underlying_symbol ILIKE %s"
+        params.append(f"%{symbol}%")
+    elif symbol_mode == "symbol" and symbol:
+        # ipo_listings carries its own symbol column rather than a resolved
+        # instrument_id (mid-bidding stocks have no instruments row yet, see
+        # init.sql's ipo_listings comment) — filter directly, no join.
+        sql += " WHERE t.symbol ILIKE %s"
         params.append(f"%{symbol}%")
     if date_col:
         sql += f" ORDER BY t.{date_col} DESC"

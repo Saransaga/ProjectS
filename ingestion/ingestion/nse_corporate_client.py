@@ -163,6 +163,23 @@ def fetch_fii_dii_activity() -> list[dict]:
     )
 
 
+def fetch_ipo_listings() -> list[dict]:
+    """NSE's mainboard IPO calendar (issue price band, bid window, status).
+    Confirmed live: https://www.nseindia.com/api/all-upcoming-issues?category=ipo
+    returns HTTP 200 with real JSON from this environment, and — like
+    fetch_fii_dii_activity — a bare GET with no warm-up cookie got real data
+    every time this was checked, unlike this module's Akamai-protected
+    endpoints; routed through the same session/retry machinery anyway for
+    consistency. category=sme returned an empty {} in this environment (no
+    live SME issue right now, not confirmed broken) — only mainboard (ipo) is
+    wired in per the domain spec's "IPO listings" scope."""
+    return _get_json(
+        "all-upcoming-issues",
+        {"category": "ipo"},
+        referer="https://www.nseindia.com/market-data/all-upcoming-issues-ipo",
+    )
+
+
 def fetch_shareholding_master() -> list[dict]:
     return _get_json(
         "corporate-share-holdings-master",

@@ -54,6 +54,7 @@ docker compose exec ingestion python -m ingestion.cli backfill-range --job <grou
 | `news`           | `rss_news`, `reddit_sentiment`                                          | every 30 min, around the clock                          |
 | `brokerage`      | `brokerage_calls`, `consensus_ratings`                                  | daily 17:00 IST, after `equity`/`index`                 |
 | `momentum`       | `fii_dii_flows`, `bulk_block_deals`, `fno_bhavcopy`, `fno_signals`, `deliverable_volume`, `relative_strength` | 17:15 IST (F&O/delivery/RS) + 18:00 IST (FII/DII) + 2 intraday windows (bulk/block deals) |
+| `events`         | `corporate_calendar`, `ipo_listings`, `index_rebalancing_schedule`       | daily 19:00 IST (calendar/IPO) + monthly 1st, 09:00 IST (rebalancing) |
 | `all`            | everything above                                                         | —                                                        |
 
 Re-running a date that already succeeded is a safe no-op — add `--force` to
@@ -375,3 +376,90 @@ phase, and fabricating a rotation signal on top of no sector data would be
 worse than not shipping it.
 
 See `--job momentum` in [Usage](#usage) for schedule and CLI.
+
+## Corporate events & calendar (Phase 7a)
+
+Forward-looking triggers ahead of key market events. Ex-dividend/record
+dates are deliberately **not** re-collected here — they already live in
+Domain 3's `corporate_actions(ex_date, record_date)`; this domain is
+additive calendar data, not a duplicate table.
+
+- **`corporate_calendar`** (`corporate_calendar`): two NSE sources bundled
+  under one job, `CorporateCalendarJob`.
+  - Board meetings (`fetch_board_meetings`, already used by Domain 3's
+    `financial_results` to find that day's reporters): a **forward** window
+    from today, materializing the same feed as a queryable calendar instead
+    of only using it transiently. Each meeting's purpose classifies into
+    `EARNINGS`/`DIVIDEND`/`BONUS`/`SPLIT`/`BUYBACK`/`RIGHTS`/`FUND_RAISING`/
+    `OTHER` (`events/classify.py`) — the decision-specific action wins over
+    routine quarterly earnings when a purpose bundles several (e.g.
+    "Financial Results/Dividend" classifies as `DIVIDEND`).
+  - AGM/EGM (`fetch_corporate_announcements` filtered to `desc ==
+    'Shareholders meeting'`): a **backward** window, since these are filed
+    ahead of the actual meeting date — the meeting date itself is
+    text-extracted from the free-text announcement (`events/classify.py`'s
+    `parse_shareholder_meeting`), not the filing date. Records that don't
+    resolve to a confirmed AGM/EGM type + date (postal ballots,
+    voting-result outcomes, ambiguous notices with no AGM/EGM keyword
+    anywhere) are dropped rather than tagged `OTHER` — without a resolved
+    date the row isn't usable calendar data.
+  - `consensus_eps_estimate` is always `NULL` this phase — no free,
+    reliable consensus-EPS source exists once Trendlyne is dropped (same
+    hard AWS WAF CAPTCHA finding as Domain 5, re-confirmed dead for this
+    domain rather than re-verified).
+- **`ipo_listings`** (`ipo_listings`): NSE's mainboard IPO calendar
+  (`all-upcoming-issues?category=ipo` — confirmed live) for issue price
+  band/bid window/status, plus **first-day listing data** derived rather
+  than fetched: NSE has no "IPO listing-day performance" endpoint, so
+  `IpoListingsJob` looks up the newly-listed symbol in `ohlcv_daily` (Domain
+  1 already ingests it the moment it starts trading) and backfills the
+  first trade date/OHLCV it finds on or after `issue_end_date` — same
+  "derive, don't duplicate-fetch" spirit as `ohlcv_weekly`'s continuous
+  aggregate. `status` moves `ACTIVE` → `CLOSED` → `LISTED` across runs;
+  `instrument_id` stays `NULL` until the backfill resolves (a stock
+  mid-bidding has no `instruments` row yet). Only the mainboard category is
+  wired in — `category=sme` returned an empty response in this environment
+  (no live SME issue at check time, not confirmed broken).
+- **`index_rebalancing_schedule`** (`index_rebalancing_schedule`): NSE
+  Indices' published rebalancing **cadence** per index — e.g. "Semi-annually
+  - Last working day of March and September" for Nifty 50 — scraped from
+  niftyindices.com's static rebalancing-schedule page
+  (`niftyindices_client.py`, confirmed live: plain server-rendered HTML
+  across all 11 index-family tables on that page, 215 indices total, no bot
+  protection). A slowly-changing reference table, not a time series;
+  refreshed monthly. **Not included**: actual per-cycle inclusion/exclusion
+  (which stocks get added/removed) — no free, scrapeable source publishes
+  that; NSE Indices' reconstitution announcements are ad hoc PDFs/press
+  releases, not a feed. BSE/Sensex has no equivalent at all —
+  bseindia.com's corporate-calendar page is an Angular SPA with zero
+  server-rendered content, and every guessed `api.bseindia.com`
+  calendar-shaped endpoint either redirected (matching `bse_client.py`'s
+  already-documented broken pattern) or was really just the generic,
+  already-flaky announcements endpoint.
+- **`macro_events`** (`macro_events`): RBI MPC meeting dates, the Union
+  Budget date, and CPI/WPI/IIP/GDP release dates. **No automated job** —
+  the domain spec's own ingestion schedule already calls this "Monthly
+  refresh + **manual updates**", and manual is the only option that
+  actually exists: RBI's "Monetary Policy" section is an ASP.NET postback
+  search UI (`GetYearMonth()` sets hidden form fields and fires a
+  `__VIEWSTATE` postback — not a GET-able URL) with no calendar API, and
+  RBI announces the year's MPC dates once, in a single annual press
+  release, not a queryable schedule. MOSPI's release-calendar page
+  (mospi.gov.in) is a client-side React shell — the raw HTML is a bare
+  `<div id="root">` with zero server-rendered content, no JSON endpoint
+  discoverable. `indiabudget.gov.in` confirms the Union Budget date is
+  real and low-churn (~Feb 1 each year) but is likewise one page updated
+  once a year, not a calendar feed. Populate via
+  `docker compose exec ingestion python -m ingestion.cli macro-event add
+  --date 2026-08-06 --category RBI_MPC --description "..."` (`--category`
+  one of `RBI_MPC`/`UNION_BUDGET`/`CPI`/`WPI`/`IIP`/`GDP`/`OTHER`).
+
+See `--job events` in [Usage](#usage) for the automated jobs' schedule and
+CLI; `macro-event add` (above) is separate since it isn't a scheduled job.
+
+**Deferred**: actual Nifty/Sensex index inclusion/exclusion events (see
+`index_rebalancing_schedule` above), an automated RBI/MOSPI macro calendar
+(no scrapeable source exists — see `macro_events` above), consensus EPS
+estimates (Trendlyne dead, no other free source), and a BSE corporate
+calendar (dead — Angular SPA, no working API, same conclusion as
+`bse_client.py`'s existing findings).

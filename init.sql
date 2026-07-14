@@ -663,3 +663,119 @@ CREATE TABLE IF NOT EXISTS relative_strength (
 SELECT create_hypertable('relative_strength', 'trade_date',
     chunk_time_interval => INTERVAL '6 months',
     if_not_exists => TRUE);
+
+-- ============================================================================
+-- Domain 7 — Corporate Events & Calendar (Phase 7a)
+-- Forward-looking triggers ahead of key market events. Ex-dividend/record
+-- dates are deliberately NOT re-collected here — they already live in
+-- Domain 3's corporate_actions(ex_date, record_date); this domain is additive
+-- calendar data, not a duplicate table. Trendlyne (the spec's earnings-
+-- calendar/consensus-EPS source) is dropped for the same hard AWS WAF CAPTCHA
+-- reason already documented in Domain 5's section — no plain HTTP client can
+-- pass it from any host.
+-- ============================================================================
+
+-- Board-meeting-driven calendar: earnings dates and the meeting at which
+-- dividend/bonus/split/buyback/rights decisions get made, from NSE's
+-- corporate-board-meetings feed (nse_corporate_client.fetch_board_meetings,
+-- already used by Domain 3's FinancialResultsJob to find that day's
+-- reporters — this domain materializes the same feed as a queryable forward
+-- calendar instead of only using it transiently). AGM/EGM rows come from a
+-- second source, NSE's corporate-announcements feed filtered to
+-- desc='Shareholders meeting' with the meeting date/type text-extracted from
+-- the free-text attchmntText (events/classify.py) — same "never drop, tag
+-- OTHER if unrecognized" spirit as Domain 3's corporate_actions classifier.
+-- consensus_eps_estimate is always NULL this phase: no free, reliable
+-- consensus-EPS source exists once Trendlyne is dropped (see section header).
+CREATE TABLE IF NOT EXISTS corporate_calendar (
+    calendar_id             BIGSERIAL PRIMARY KEY,
+    instrument_id           BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    event_date              DATE NOT NULL,
+    event_type              TEXT NOT NULL CHECK (event_type IN
+                                 ('EARNINGS','DIVIDEND','BONUS','SPLIT','BUYBACK','RIGHTS',
+                                  'FUND_RAISING','AGM','EGM','OTHER')),
+    purpose                 TEXT NOT NULL,
+    description             TEXT,
+    consensus_eps_estimate  NUMERIC(14,4),
+    source                  TEXT NOT NULL DEFAULT 'NSE',
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (instrument_id, event_date, purpose)
+);
+
+CREATE INDEX IF NOT EXISTS idx_corporate_calendar_instrument ON corporate_calendar (instrument_id, event_date DESC);
+CREATE INDEX IF NOT EXISTS idx_corporate_calendar_date ON corporate_calendar (event_date);
+
+-- NSE's "all-upcoming-issues" mainboard IPO feed (issue price band, bid
+-- window, status) plus first-day listing OHLC. NSE has no dedicated
+-- "first-day IPO performance" endpoint, so listing_date/listing_* are
+-- derived, not fetched: IpoListingsJob looks up the newly-listed symbol in
+-- ohlcv_daily (Domain 1 already ingests it the moment it starts trading, no
+-- special-casing needed there) and backfills the first trade_date it finds
+-- after issue_end_date, same "derive, don't duplicate-fetch" spirit as
+-- ohlcv_weekly's continuous aggregate. instrument_id stays NULL until that
+-- backfill succeeds — a stock mid-bidding has no instruments row yet.
+CREATE TABLE IF NOT EXISTS ipo_listings (
+    ipo_id              BIGSERIAL PRIMARY KEY,
+    symbol              TEXT NOT NULL,
+    company_name        TEXT NOT NULL,
+    instrument_id       BIGINT REFERENCES instruments(instrument_id),
+    issue_price_low     NUMERIC(14,4),
+    issue_price_high    NUMERIC(14,4),
+    issue_size_shares   BIGINT,
+    issue_start_date    DATE,
+    issue_end_date      DATE,
+    status               TEXT NOT NULL CHECK (status IN ('ACTIVE','CLOSED','LISTED')),
+    listing_date        DATE,
+    listing_open        NUMERIC(14,4),
+    listing_high        NUMERIC(14,4),
+    listing_low         NUMERIC(14,4),
+    listing_close       NUMERIC(14,4),
+    listing_volume      BIGINT,
+    source              TEXT NOT NULL DEFAULT 'NSE',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (symbol, issue_start_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ipo_listings_status ON ipo_listings (status) WHERE status != 'LISTED';
+
+-- NSE Indices' published rebalancing cadence per index (niftyindices.com's
+-- static rebalancing-schedule page — verified live, plain server-rendered
+-- HTML, unlike bseindia.com's corporate-calendar/API which are Angular-SPA/
+-- dead, see nse_client.py-adjacent niftyindices_client.py docstring). A
+-- slowly-changing reference table (one row per index, re-upserted whenever
+-- the job runs), not a time series — rebalance_frequency is free text
+-- (e.g. "Semi-annually - Last working day of March and September"), not a
+-- structured cadence, since NSE's own wording varies index-family to
+-- index-family. Actual per-cycle inclusion/exclusion (which stocks get
+-- added/removed) is NOT here — no free, scrapeable source publishes that;
+-- NSE Indices' reconstitution announcements are ad hoc PDFs/press releases,
+-- and BSE/Sensex has nothing at all (bseindia.com's corporate-calendar is a
+-- JS SPA with no working API, same dead-end already documented for
+-- fetch_announcements in bse_client.py). Deferred, not silently dropped.
+CREATE TABLE IF NOT EXISTS index_rebalancing_schedule (
+    index_name          TEXT PRIMARY KEY,
+    rebalance_frequency TEXT NOT NULL,
+    source              TEXT NOT NULL DEFAULT 'NSE_INDICES',
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- RBI MPC meeting dates, Union Budget date, and CPI/WPI/IIP/GDP release
+-- dates — the domain spec's own ingestion-schedule table already calls
+-- these "Monthly refresh + manual updates", and that's the only option that
+-- actually exists: RBI publishes the year's MPC dates in a single annual
+-- press release with no calendar API (rbi.org.in's "Monetary Policy" menu
+-- is an ASP.NET postback search UI, not a GET-able forward schedule), and
+-- MOSPI's release-calendar page (mospi.gov.in) is a client-side React app
+-- with zero server-rendered content — no JSON endpoint discoverable from
+-- either. This table exists purely so that manual entry (see `cli.py
+-- macro-event add`) has somewhere to land; there is no automated job for it.
+CREATE TABLE IF NOT EXISTS macro_events (
+    event_id      BIGSERIAL PRIMARY KEY,
+    event_date    DATE NOT NULL,
+    category      TEXT NOT NULL CHECK (category IN
+                      ('RBI_MPC','UNION_BUDGET','CPI','WPI','IIP','GDP','OTHER')),
+    description   TEXT NOT NULL,
+    source        TEXT NOT NULL DEFAULT 'MANUAL',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (event_date, category)
+);
