@@ -10,8 +10,9 @@ built and verified, what's deliberately dropped/deferred (and why), and
 counts the scheduled flows that currently run inside the `ingestion`
 container.
 
-Companion doc: [`DATABASE_ERD.md`](./DATABASE_ERD.md) for the full schema
-diagram.
+Companion docs: [`DATABASE_ERD.md`](./DATABASE_ERD.md) for the full schema
+diagram, [`OPERATIONS.md`](./OPERATIONS.md) for the scheduled-downtime
+window and a running changelog of fixes/features per session.
 
 ---
 
@@ -253,14 +254,39 @@ plan from `scheduler.py`.
   chat that's ever messaged the bot).
 - **New always-on process** (not a cron job): `telegram_bot/telegram_listener.py`
   long-polls the Telegram Bot API and answers inbound chat messages —
-  `/watch`, `/unwatch`, `/list`, `/recommend`, or a bare symbol/company-name
-  lookup (resolved via `query/resolve.py`, which reuses Domain 4's
+  `/watch`, `/unwatch`, `/list`, `/recommend`, `/top` (today's top 5
+  short-term BUY ideas, on demand), or a bare symbol/company-name lookup
+  (resolved via `query/resolve.py`, which reuses Domain 4's
   `news/ticker_matching.normalize_name` for company-name fuzzy matching).
   Runs as its own `docker-compose` service (`telegram-listener`) since a
   long-poll loop is a permanent blocking process, not a scheduled tick.
+- **Price targets, exit levels, and a pace estimate**: every recommendation
+  (`/recommend`, `/top`, watchlist alerts, the daily digest) now shows a
+  direction-aware target/exit price derived from `support_resistance_levels`
+  (Domain 2's real pivot-clustered data) — BUY gets nearest resistance as
+  target / nearest support as exit trigger, SELL the reverse — falling back
+  to an ATR(14)-based projection (`close ± multiple × ATR`, labeled
+  `ATR-projected`) when no historical level exists yet (e.g. a breakout to
+  a new high). A "time to target" pace estimate (distance ÷ ATR14) is shown
+  alongside it, deliberately framed as a pace, not a forecast or a
+  fabricated date. See `docs/OPERATIONS.md` for the full changelog.
+- **Justification bullets**: the top 2-3 highest-weighted contributing
+  factors from the rationale JSONB, rendered as plain English
+  (`recommendation/rationale_text.py`).
 - **Design notes**:
   - Scoring is 100% deterministic/heuristic (weighted subscores, see
     `recommendation/short_term.py`/`long_term.py`), deliberately no LLM.
+  - Short-term now draws on Domains 1/2/4/6/7 (technicals, signal events,
+    relative strength/F&O/bulk-block-deals/FII-DII flow, news sentiment,
+    upcoming corporate events); long-term on 3/5/6 (fundamentals,
+    valuation, shareholding trend, brokerage consensus, relative strength).
+    `fii_dii_market_flow` is market-wide (one value shared by every
+    instrument that day), so it's excluded from the "do we have enough
+    real per-instrument data" gate (`ComponentResult.counts_toward_gate` in
+    `aggregate.py`) even though it can still influence the final score —
+    otherwise a non-instrument-specific signal could single-handedly fake
+    "sufficient data" for a stock with no real coverage at all (caught
+    live, see `docs/OPERATIONS.md`).
   - A component subscore is `NULL` only when its source data genuinely
     doesn't exist for that instrument (e.g. no F&O contract, fewer than 2
     shareholding periods) — never a fabricated 0; `aggregate.py` leaves the
