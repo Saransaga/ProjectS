@@ -91,6 +91,16 @@ _JOBS = {
     ],
 }
 
+# `--job` also accepts a single job_name (e.g. "fno_bhavcopy"), not just a
+# group above. Needed because scheduler.py's actual production cron slots
+# are finer-grained than these CLI groups — e.g. "momentum" bundles
+# fii_dii_flows and bulk_block_deals with the F&O jobs here for convenient
+# manual backfills, but scheduler.py runs those two on their own separate
+# schedules. An orchestrator (Airflow) that wants to replicate scheduler.py's
+# real per-slot grouping exactly needs to address one job at a time.
+_INDIVIDUAL_JOBS = {cls.job_name: [cls] for cls in _JOBS["all"]}
+_RUNNABLE = {**_JOBS, **_INDIVIDUAL_JOBS}
+
 
 @click.group()
 def cli():
@@ -98,18 +108,18 @@ def cli():
 
 
 @cli.command()
-@click.option("--job", type=click.Choice(list(_JOBS)), default="all")
+@click.option("--job", type=click.Choice(list(_RUNNABLE)), default="all")
 @click.option("--date", "date_str", required=True, help="YYYY-MM-DD")
 @click.option("--force", is_flag=True, help="Re-run even if already SUCCESS for this date")
 def backfill(job, date_str, force):
     run_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    for job_cls in _JOBS[job]:
+    for job_cls in _RUNNABLE[job]:
         status = job_cls().run(run_date, force=force)
         click.echo(f"{job_cls.job_name} {run_date} -> {status}")
 
 
 @cli.command(name="backfill-range")
-@click.option("--job", type=click.Choice(list(_JOBS)), default="all")
+@click.option("--job", type=click.Choice(list(_RUNNABLE)), default="all")
 @click.option("--from", "from_str", required=True, help="YYYY-MM-DD")
 @click.option("--to", "to_str", required=True, help="YYYY-MM-DD")
 @click.option("--force", is_flag=True)
@@ -118,7 +128,7 @@ def backfill_range(job, from_str, to_str, force):
     end = datetime.strptime(to_str, "%Y-%m-%d").date()
     d = start
     while d <= end:
-        for job_cls in _JOBS[job]:
+        for job_cls in _RUNNABLE[job]:
             status = job_cls().run(d, force=force)
             click.echo(f"{job_cls.job_name} {d} -> {status}")
         d += timedelta(days=1)

@@ -78,6 +78,117 @@ services:
     networks:
       - storage
 
+  # --- Airflow: orchestrates the same ingestion CLI scheduler.py already
+  # uses, via DockerOperator launching throwaway containers from the
+  # `ingestion` image above (see airflow/dags/_ingestion_docker.py). Kept on
+  # its own dedicated Postgres instance for metadata — deliberately not
+  # sharing the TimescaleDB `postgres` service above, to avoid mixing
+  # Airflow's own schema/migrations with the trading data database.
+  #
+  # Before first `docker compose up`, create the log volume with the image's
+  # default uid (50000) so the container can actually write to it:
+  #   sudo mkdir -p /data/airflow-logs && sudo chown -R 50000:0 /data/airflow-logs
+  # (Docker auto-creates bind-mount dirs as root:root, which the airflow
+  # user can't write into — this bit us on first boot, see airflow/README.md.)
+  airflow-postgres:
+    image: postgres:16-alpine
+    container_name: storage-airflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - /data/airflow-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - storage
+
+  airflow-init:
+    build:
+      context: ./airflow
+    container_name: storage-airflow-init
+    environment: &airflow-common-env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      # Read by airflow/dags/_ingestion_docker.py's ingestion_task() to talk
+      # to the ingestion image/network — see that file's docstring.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      REDIS_HOST: redis
+      INGESTION_DOCKER_NETWORK: project_storage
+      INGESTION_IMAGE: project-ingestion:latest
+      TZ: Asia/Kolkata
+    env_file:
+      - .env
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - /data/airflow-logs:/opt/airflow/logs
+    entrypoint: /bin/bash
+    command: ["-c", "airflow db migrate && (airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true)"]
+    networks:
+      - storage
+
+  airflow-webserver:
+    build:
+      context: ./airflow
+    container_name: storage-airflow-webserver
+    restart: unless-stopped
+    command: webserver
+    environment: *airflow-common-env
+    env_file:
+      - .env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - /data/airflow-logs:/opt/airflow/logs
+      # Lets DockerOperator (in the DAGs) talk to the host Docker daemon to
+      # launch ingestion-image containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The socket is group-owned by the host's `docker` group (not root), and
+    # the image's default airflow user (uid 50000, gid 0) isn't in it —
+    # confirmed live: DockerOperator tasks failed with "Permission denied"
+    # against the socket until this was added. Find your host's GID with
+    # `getent group docker` and set DOCKER_GID in .env if it isn't 1001.
+    group_add:
+      - "${DOCKER_GID:-1001}"
+    ports:
+      - "8080:8080"
+    networks:
+      - storage
+
+  airflow-scheduler:
+    build:
+      context: ./airflow
+    container_name: storage-airflow-scheduler
+    restart: unless-stopped
+    command: scheduler
+    environment: *airflow-common-env
+    env_file:
+      - .env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - /data/airflow-logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-1001}"
+    networks:
+      - storage
+
 networks:
   storage:
     driver: bridge
