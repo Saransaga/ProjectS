@@ -52,6 +52,8 @@ docker compose exec ingestion python -m ingestion.cli backfill-range --job <grou
 | `fundamentals`   | `corporate_actions`, `shareholding_pattern`, `financial_results`, `fundamental_ratios` | actions + results daily 18:30 IST; the rest weekly Sun 20:00 IST |
 | `announcements`  | `nse_announcements`, `bse_announcements`                                | every 5 min, market hours only (09:15-15:30 IST, mon-fri) |
 | `news`           | `rss_news`, `reddit_sentiment`                                          | every 30 min, around the clock                          |
+| `brokerage`      | `brokerage_calls`, `consensus_ratings`                                  | daily 17:00 IST, after `equity`/`index`                 |
+| `momentum`       | `fii_dii_flows`, `bulk_block_deals`, `fno_bhavcopy`, `fno_signals`, `deliverable_volume`, `relative_strength` | 17:15 IST (F&O/delivery/RS) + 18:00 IST (FII/DII) + 2 intraday windows (bulk/block deals) |
 | `all`            | everything above                                                         | —                                                        |
 
 Re-running a date that already succeeded is a safe no-op — add `--force` to
@@ -236,3 +238,140 @@ since news doesn't stop on weekends the way the trading-day-gated jobs do.
 
 **Deferred**: a trained NER/sentiment model (FinBERT or similar) in place of
 the keyword heuristics above, plus any source requiring paid API access.
+
+## Brokerage recommendations & consensus (Phase 5a)
+
+Two jobs, run in sequence after the daily EOD close:
+
+- **`brokerage_calls`** (`brokerage_calls` + `rating_change_events`):
+  Moneycontrol's per-stock "Broker Research" section
+  (`moneycontrol_client.py`) is the primary — and only real-time — source,
+  walked across every active NSE equity (~2,000+ pages, one HTTP fetch each
+  plus a rate-limit sleep, so a full run takes on the order of tens of
+  minutes; see the job's docstring). **Observed live under sustained load**
+  (a real full-universe backfill, 2026-07-14): the autosuggest endpoint
+  (`resolve_stock`), which the spot-checks in `moneycontrol_client.py`'s
+  docstring verified fine for a handful of names, started returning HTTP 403
+  after only ~4 resolutions in one run — every subsequent instrument then
+  burns 3 retries' worth of backoff for nothing, which would turn a "tens of
+  minutes" run into several hours with zero further data landing. This
+  wasn't caught by the original spot-check verification; treat it as a real
+  risk, not a hypothetical one — if a production run stalls with a flat
+  `moneycontrol_instrument_map` count, this is the first thing to check.
+  Each stock's Moneycontrol page URL/stock code is resolved once via the
+  autosuggest endpoint and cached in
+  `moneycontrol_instrument_map`, not re-resolved every run. Raw rating text
+  ("BUY", "ACCUMULATE", "REDUCE", ...) is classified into the fixed
+  STRONG_BUY/BUY/HOLD/SELL/STRONG_SELL scale by `brokerage/classify.py`
+  (exact-match against a known vocabulary; unrecognized terms are still
+  stored via `raw_rating`, just left unclassified — never dropped, same
+  spirit as Domain 3's `corporate_actions.action_type = 'OTHER'`). Every new
+  call is diffed against that same brokerage's immediately-prior call for the
+  same instrument to emit an `UPGRADE`/`DOWNGRADE`/`REITERATED`/`INITIATED`
+  row in `rating_change_events`.
+- **`consensus_ratings`** (`consensus_ratings`): a daily recompute (not a
+  live feed — `always_force=True`, like `fundamental_ratios`) over each
+  instrument's latest-per-brokerage call within a trailing 12-month window:
+  majority-vote `consensus_rating_bucket` (ties break toward the more bullish
+  bucket, see `brokerage/consensus.py`), `avg_target_price`, and
+  `implied_upside_pct` against the latest `ohlcv_daily` close. Best-effort
+  cross-checked against Tickertape's server-rendered "Analyst Ratings &
+  Forecast" card (`tickertape_client.py`) for `tickertape_pct_buy` /
+  `tickertape_analyst_count` — kept as separate columns rather than blended
+  into the Moneycontrol-derived fields, since the two sources count
+  "analysts" differently and disagreement between them is itself signal.
+
+**Known limitation — Tickertape slug resolution**: Tickertape's own
+symbol-search API is IP-blocked from this environment, so there's no
+reliable way to resolve an NSE symbol to a Tickertape slug. `guess_slug()`
+guesses `{company-name-slug}-{NSE_SYMBOL}`, which is sometimes wrong
+(Tickertape's internal ID rarely matches the NSE symbol) — a failed or
+wrong guess just leaves `tickertape_pct_buy`/`tickertape_analyst_count`
+`NULL` for that instrument/day, and never blocks the Moneycontrol-derived
+fields. Full-universe slug resolution (e.g. scraping Tickertape's sitemap)
+is deferred.
+
+**Trendlyne dropped from this phase**: the spec's originally-intended
+primary source for consensus ratings/targets sits behind a hard AWS WAF
+CAPTCHA challenge (verified live) — not merely flaky/IP-blocked like
+`bse_client.py`'s endpoints, so a plain HTTP client can never pass it from
+any host. Wiring it in would have shipped permanently dead code rather than
+a "verify before trusting" caveat.
+
+**Moneycontrol pagination caveat**: every stock page checked server-side
+ships exactly the ~6 most recent broker-research entries (older calls are
+presumably paginated/lazy-loaded via JS this client doesn't execute) — treat
+`brokerage_calls` as "recent calls", not a full historical archive.
+
+See `--job brokerage` in [Usage](#usage) for schedule and CLI.
+
+**Deferred**: full-universe Tickertape slug resolution, a Trendlyne source
+once/if its CAPTCHA wall is solvable another way, and paginated/lazy-loaded
+Moneycontrol history beyond the ~6 most recent calls per stock.
+
+## Momentum & market microstructure (Phase 6a)
+
+Six jobs, all sourced from NSE's own unauthenticated static archives
+(`nsearchives.nseindia.com` — same trust tier as Domain 1's bhavcopy, no
+bot protection) or its `fiidiiTradeReact` interactive endpoint:
+
+- **`fii_dii_flows`** (`fii_dii_cash_flows` + `fno_participant_oi`): cash-market
+  FII/DII net buy/sell (Rs. crore) from NSE's `fiidiiTradeReact`, which always
+  returns "whatever was last published" — no date-range param, same
+  "whatever's current" shape as Domain 3's `corporate_actions` — plus NSCCL's
+  daily "Participant wise Open Interest" snapshot, broken down by client type
+  (Client/DII/FII/Pro) across futures/options × index/stock. NSE does not
+  publish a free FII/DII *turnover* figure for the F&O segment the way it
+  does for cash — day-over-day deltas in participant OI are the closest free,
+  legitimate proxy analysts actually use for F&O institutional positioning;
+  don't mistake `fno_participant_oi`'s open-interest columns for a value
+  figure. Weekly/monthly cumulative cash flows are a `SUM(net_value_cr)` query
+  over a date range on `fii_dii_cash_flows`, not a separately materialized
+  rollup.
+- **`bulk_block_deals`** (`bulk_block_deals`): NSE's `bulk.csv`/`block.csv`,
+  which (like the announcements feeds in Domain 4) only ever serve "today's"
+  deals — `always_force=True`, meant to run in the domain spec's "2 intraday
+  windows". **NSE only** — every guessed `api.bseindia.com` bulk/block-deal
+  endpoint returned an ASP.NET error page, not JSON, from this environment
+  (unlike `bse_client.py`'s existing endpoints, which are at least
+  intermittently reachable); dropped for the same "don't ship dead code for
+  an unverified endpoint" reason Trendlyne was dropped from Domain 5.
+- **`fno_bhavcopy`** (`fno_bhavcopy_daily`): every F&O contract (index/stock
+  futures + options, ~36,000 rows/day) from NSE's daily UDiFF F&O bhavcopy.
+  `instrument_id` is only resolved for stock underlyings — index underlyings
+  (`NIFTY`, `BANKNIFTY`, ...) have no matching row in `instruments` (Domain 1
+  only carries "Nifty 50"/"Nifty Bank", a different naming convention), so
+  `underlying_symbol` is the only reliable join key for index contracts.
+- **`fno_signals`** (`fno_signals`, `fno_oi_buildup`, `fno_rollover`): reads
+  `fno_bhavcopy_daily` (must run after `fno_bhavcopy` for the same date) and
+  computes, per underlying: Put-Call Ratio (OI-based and volume-based) + the
+  max-pain strike per expiry's option chain (`momentum/pcr.py`); futures
+  OI-buildup classification — LONG_BUILDUP/SHORT_BUILDUP/LONG_UNWINDING/
+  SHORT_COVERING — straight off the bhavcopy's own previous-close/change-in-OI
+  fields, no separate prior-day lookup needed (`momentum/oi_buildup.py`); and
+  near/next-month futures rollover % (`momentum/rollover.py`). "Market-wide"
+  PCR per the domain spec is just the `underlying_symbol = 'NIFTY'` rows in
+  `fno_signals`, not a separately stored figure.
+- **`deliverable_volume`**: backfills `ohlcv_daily.delivery_qty`/
+  `delivery_pct` — present in the schema since Domain 1 but always `NULL`
+  until now — from NSE's older "full bhavcopy" archive, the only free source
+  that carries delivery data (the UDiFF bhavcopy Domain 1 uses doesn't have
+  it at all). An `UPDATE` against Domain 1's existing rows, not an `INSERT`.
+- **`relative_strength`** (`relative_strength`): reads `ohlcv_daily` directly
+  (not an external source, like Domain 2's `technical_indicators`) and
+  computes each equity's trailing 1W/1M/3M/6M/1Y total return, that same
+  return relative to Nifty 50, and an IBD-style RS Rating (1-99 percentile
+  rank of a composite score across every equity with full history that day).
+  The composite is a simplified 40/30/30 blend of 3M/6M/1Y returns — IBD's
+  official formula weights 3/6/9/12M returns 40/20/20/20, but this phase
+  doesn't otherwise need a 9-month return, so substitutes the windows it does
+  store (`momentum/relative_strength.py`).
+
+**Dropped from this phase**: BSE bulk/block deals (see above) and Trendlyne
+(RS-Rating/momentum-score source per the original spec — sits behind a hard
+AWS WAF CAPTCHA, same finding as Domain 5). **Deferred**: sector rotation
+signals — `instruments` carries no sector/industry classification in this
+phase, and fabricating a rotation signal on top of no sector data would be
+worse than not shipping it.
+
+See `--job momentum` in [Usage](#usage) for schedule and CLI.

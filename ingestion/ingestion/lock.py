@@ -6,7 +6,7 @@ from .config import config
 
 _redis = redis.Redis(host=config.REDIS_HOST, port=config.REDIS_PORT, decode_responses=True)
 
-_LOCK_TTL_MS = 15 * 60 * 1000  # 15 minutes — well above a single EOD job's expected runtime
+_LOCK_TTL_MS = 90 * 60 * 1000  # 90 minutes — above even BrokerageCallsJob's "tens of minutes" full-universe scrape
 
 
 class JobLock:

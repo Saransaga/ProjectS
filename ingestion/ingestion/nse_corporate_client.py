@@ -145,6 +145,24 @@ def fetch_corporate_announcements(
     )
 
 
+def fetch_fii_dii_activity() -> list[dict]:
+    """NSE's daily cash-market FII/DII net buy/sell (Rs. crore), Domain 6's
+    primary FII/DII source. Confirmed live: returns exactly 2 records, one
+    each for category "DII" and "FII/FPI", e.g. {"buyValue": "17393.46",
+    "category": "DII", "date": "13-Jul-2026", "netValue": "2171.7",
+    "sellValue": "15221.76"}. Unlike this module's other endpoints, a bare
+    GET (no warm-up cookie) returned real data every time this was checked —
+    routed through the same session/retry machinery here anyway for
+    consistency and because that may not hold under different conditions.
+    No from_date/to_date params: this always returns "whatever NSE last
+    published" (see FiiDiiFlowsJob), not a queryable date range."""
+    return _get_json(
+        "fiidiiTradeReact",
+        {},
+        referer="https://www.nseindia.com/reports/fii-dii",
+    )
+
+
 def fetch_shareholding_master() -> list[dict]:
     return _get_json(
         "corporate-share-holdings-master",

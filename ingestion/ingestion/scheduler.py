@@ -4,15 +4,23 @@ from datetime import date
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from .holiday_calendar import is_market_hours
+from .jobs.brokerage_calls import BrokerageCallsJob
 from .jobs.bse_announcements import BseAnnouncementsJob
+from .jobs.bulk_block_deals import BulkBlockDealsJob
 from .jobs.candlestick_patterns import CandlestickPatternsJob
+from .jobs.consensus_ratings import ConsensusRatingsJob
 from .jobs.corporate_actions import CorporateActionsJob
+from .jobs.deliverable_volume import DeliverableVolumeJob
 from .jobs.equity_eod import EquityEodJob
+from .jobs.fii_dii_flows import FiiDiiFlowsJob
 from .jobs.financial_results import FinancialResultsJob
+from .jobs.fno_bhavcopy import FnoBhavcopyJob
+from .jobs.fno_signals import FnoSignalsJob
 from .jobs.fundamental_ratios import FundamentalRatiosJob
 from .jobs.index_eod import IndexEodJob
 from .jobs.nse_announcements import NseAnnouncementsJob
 from .jobs.reddit_sentiment import RedditSentimentJob
+from .jobs.relative_strength import RelativeStrengthJob
 from .jobs.rss_news import RssNewsJob
 from .jobs.shareholding_pattern import ShareholdingPatternJob
 from .jobs.signal_events import SignalEventsJob
@@ -70,6 +78,29 @@ def _run_news_jobs():
     _run_jobs(RssNewsJob(), RedditSentimentJob())
 
 
+def _run_brokerage_jobs():
+    # ConsensusRatingsJob recomputes from brokerage_calls + the latest close
+    # (ohlcv_daily), so it must run after both EquityEodJob (16:00, above) and
+    # BrokerageCallsJob in this same run.
+    _run_jobs(BrokerageCallsJob(), ConsensusRatingsJob())
+
+
+def _run_daily_momentum_jobs():
+    # FnoSignalsJob reads fno_bhavcopy_daily, so it must follow FnoBhavcopyJob
+    # in this same run. DeliverableVolumeJob/RelativeStrengthJob both need
+    # EquityEodJob's 16:00 rows for the same trade_date but have no ordering
+    # dependency on the F&O jobs or each other.
+    _run_jobs(FnoBhavcopyJob(), FnoSignalsJob(), DeliverableVolumeJob(), RelativeStrengthJob())
+
+
+def _run_fii_dii_jobs():
+    _run_jobs(FiiDiiFlowsJob())
+
+
+def _run_deal_window_jobs():
+    _run_jobs(BulkBlockDealsJob())
+
+
 def build_scheduler() -> BlockingScheduler:
     scheduler = BlockingScheduler(timezone="Asia/Kolkata")
     # 16:00 IST — after the 15:45 bhavcopy publish time, with a buffer for
@@ -80,6 +111,45 @@ def build_scheduler() -> BlockingScheduler:
         hour=16,
         minute=0,
         id="daily_eod_ingest",
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    # 17:00 IST — brokerage calls (Moneycontrol Broker Research, a slow
+    # ~2,000-instrument sequential scrape per BrokerageCallsJob's docstring)
+    # + consensus recompute, after the 16:00 EOD run but with a buffer before
+    # 18:30 fundamentals.
+    scheduler.add_job(
+        _run_brokerage_jobs,
+        "cron",
+        hour=17,
+        minute=0,
+        id="daily_brokerage_ingest",
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    # 17:15 IST — F&O bhavcopy (published ~17:00 IST per the domain spec) +
+    # derived PCR/max-pain/OI-buildup/rollover signals, plus delivery-volume
+    # backfill and relative-strength recompute (both only need the 16:00
+    # EOD run, riding along in this slot for simplicity).
+    scheduler.add_job(
+        _run_daily_momentum_jobs,
+        "cron",
+        hour=17,
+        minute=15,
+        id="daily_momentum_ingest",
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    # 18:00 IST — cash-market FII/DII net buy/sell, published ~18:00 IST per
+    # the domain spec (fiidiiTradeReact itself has no from/to_date param, so
+    # this is always "whatever NSE most recently published" — see
+    # FiiDiiFlowsJob).
+    scheduler.add_job(
+        _run_fii_dii_jobs,
+        "cron",
+        hour=18,
+        minute=0,
+        id="fii_dii_ingest",
         coalesce=True,
         misfire_grace_time=3600,
     )
@@ -130,5 +200,18 @@ def build_scheduler() -> BlockingScheduler:
         id="news_poll",
         coalesce=True,
         misfire_grace_time=300,
+    )
+    # 2 intraday windows (mon-fri), per the domain spec — late morning and
+    # just after the 15:30 close, since bulk/block deals settle intraday and
+    # bulk.csv/block.csv only ever serve "today's" running list.
+    scheduler.add_job(
+        _run_deal_window_jobs,
+        "cron",
+        hour="12,16",
+        minute=0,
+        day_of_week="mon-fri",
+        id="bulk_block_deals_poll",
+        coalesce=True,
+        misfire_grace_time=1800,
     )
     return scheduler
