@@ -13,17 +13,9 @@ class Config:
 
     TZ = os.environ.get("TZ", "Asia/Kolkata")
 
-    # Optional: Reddit's official API (PRAW) needs a registered "script" app
-    # at reddit.com/prefs/apps. Left unset, the Reddit job skips gracefully
-    # rather than failing the whole ingestion run.
-    REDDIT_CLIENT_ID = os.environ.get("REDDIT_CLIENT_ID")
-    REDDIT_CLIENT_SECRET = os.environ.get("REDDIT_CLIENT_SECRET")
-    REDDIT_USER_AGENT = os.environ.get("REDDIT_USER_AGENT", "trading-data-pipeline/1.0")
-
     # Optional: a bot token from @BotFather (api.telegram.org/bot<token>/...).
     # Left unset, TelegramAlertsJob and telegram_listener.py both log a clear
-    # error and no-op rather than crashing at import — same graceful-
-    # degradation pattern as REDDIT_CLIENT_ID above. Deliberately no
+    # error and no-op rather than crashing at import. Deliberately no
     # TELEGRAM_CHAT_ID: the broadcast audience is entirely DB-driven
     # (telegram_chats, populated as chats message the bot), never a single
     # hardcoded chat, since multi-user support is a requirement from day one.

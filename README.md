@@ -217,10 +217,14 @@ this domain is "breaking news for ticker X across every source":
   Akamai/WAF block) but stays wired in in case it works elsewhere. One bad
   feed is caught and logged per-feed, never takes the whole job down.
 - **`reddit_sentiment`** (`ingestion/jobs/reddit_sentiment.py`): r/IndiaInvestments
-  + r/stocks via PRAW (`reddit_client.py`), read-only. Reddit credentials
-  (`REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`, from a registered "script" app
-  at reddit.com/prefs/apps) are optional infra — unset, the job just reports
-  0 rows instead of failing the run.
+  + r/stocks via Reddit's public `.json` listing endpoints (`reddit_client.py`),
+  no API credentials — self-serve "script" app registration at
+  reddit.com/prefs/apps is no longer reliably available, so this scrapes the
+  same read-only listings a logged-out browser sees. **Unverified from this
+  environment** (HTTP 403, Akamai/PerimeterX block) — confirm it works from
+  the real deployment host before relying on it; see `reddit_client.py`'s
+  docstring for the fallback options if it doesn't (proxy, or a paid data
+  provider).
 
 **Enrichment** (`ingestion/news/pipeline.py`, run once per item by every job
 above): ticker tagging via alias-index regex matching against `instruments`

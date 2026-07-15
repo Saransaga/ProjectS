@@ -103,6 +103,10 @@ TABLES = {
 
 @st.cache_resource
 def get_connection():
+    # Jobs use their own pool (ingestion.db), never this connection, so it's
+    # safe to pin this one read-only at the session level — a real DB-level
+    # guard against accidental writes from the free-form SQL Query tab, not
+    # just a string check on the query text.
     conn = psycopg2.connect(
         host=config.POSTGRES_HOST,
         port=config.POSTGRES_PORT,
@@ -110,7 +114,7 @@ def get_connection():
         password=config.POSTGRES_PASSWORD,
         dbname=config.POSTGRES_DB,
     )
-    conn.autocommit = True
+    conn.set_session(readonly=True, autocommit=True)
     return conn
 
 
@@ -120,7 +124,9 @@ def run_query(sql: str, params=None) -> pd.DataFrame:
 
 st.title("Trading Data Pipeline")
 
-tab_overview, tab_jobs, tab_browse = st.tabs(["Overview", "Run Jobs", "Browse Data"])
+tab_overview, tab_jobs, tab_browse, tab_query = st.tabs(
+    ["Overview", "Run Jobs", "Browse Data", "SQL Query"]
+)
 
 with tab_overview:
     col1, col2, col3, col4 = st.columns(4)
@@ -198,3 +204,29 @@ with tab_browse:
     params.append(int(limit))
 
     st.dataframe(run_query(sql, params), use_container_width=True)
+
+with tab_query:
+    st.subheader("Run a read-only SQL query")
+    st.caption(
+        "The dashboard's DB connection is pinned read-only, so writes are rejected "
+        "by Postgres itself — this is for ad-hoc SELECTs to analyze the tables above."
+    )
+    st.caption("Tables: " + ", ".join(sorted(TABLES)))
+
+    default_sql = "SELECT * FROM ohlcv_daily ORDER BY trade_date DESC LIMIT 100"
+    sql_text = st.text_area("SQL", value=default_sql, height=160)
+
+    if st.button("Execute", type="primary"):
+        try:
+            result = run_query(sql_text)
+        except Exception as e:
+            st.error(f"Query failed: {e}")
+        else:
+            st.success(f"{len(result)} row(s) returned")
+            st.dataframe(result, use_container_width=True)
+            st.download_button(
+                "Download CSV",
+                result.to_csv(index=False).encode("utf-8"),
+                file_name="query_result.csv",
+                mime="text/csv",
+            )
