@@ -24,6 +24,7 @@ from .jobs.industry_classification import IndustryClassificationJob
 from .jobs.ipo_listings import IpoListingsJob
 from .jobs.nse_announcements import NseAnnouncementsJob
 from .jobs.recommendation_engine import RecommendationEngineJob
+from .jobs.recommendation_outcomes import RecommendationOutcomesJob
 from .jobs.reddit_sentiment import RedditSentimentJob
 from .jobs.relative_strength import RelativeStrengthJob
 from .jobs.rss_news import RssNewsJob
@@ -76,7 +77,9 @@ _EVENTS_JOBS = [CorporateCalendarJob, IpoListingsJob, IndexRebalancingScheduleJo
 # on unrelated schedules in scheduler.py (industry_classification is a rare
 # monthly refresh; recommendation_engine is a daily recompute), this group
 # only exists as a convenient bundle for manual backfills.
-_RECOMMENDATION_JOBS = [IndustryClassificationJob, RecommendationEngineJob]
+# recommendation_outcomes reads today's fresh stock_recommendations row, so
+# it must follow recommendation_engine.
+_RECOMMENDATION_JOBS = [IndustryClassificationJob, RecommendationEngineJob, RecommendationOutcomesJob]
 
 # TelegramAlertsJob reads stock_recommendations, so it must follow
 # recommendation_engine in a manual/backfill run of this group.

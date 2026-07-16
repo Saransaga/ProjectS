@@ -827,6 +827,59 @@ CREATE TABLE IF NOT EXISTS stock_recommendations (
 CREATE INDEX IF NOT EXISTS idx_stock_recommendations_short ON stock_recommendations (as_of_date, short_term_score DESC);
 CREATE INDEX IF NOT EXISTS idx_stock_recommendations_long ON stock_recommendations (as_of_date, long_term_score DESC);
 
+-- ============================================================================
+-- Domain 8 addition — Recommendation Outcome Tracking
+-- Turns each day's stock_recommendations row into a trackable "call": snapshots
+-- the implied target/stop at entry (recommendation/price_levels.py — the same
+-- logic the Telegram bot uses to show a target/exit), then
+-- RecommendationOutcomesJob walks ohlcv_daily forward each day to see whether
+-- price touched the target, the stop, or neither before the call expires.
+-- Powers "how good are our BUY calls" reporting: win rate, days-to-resolution,
+-- accuracy by action bucket and by dominant rationale component.
+--
+-- Only non-HOLD actions are tracked (HOLD has no directional target). One row
+-- per (instrument_id, as_of_date, horizon) — a call is opened once and never
+-- re-opened by a later idempotent rerun (ON CONFLICT DO NOTHING on insert).
+--
+-- trading_days_elapsed (not a precomputed expiry date): holiday_calendar.py's
+-- own holidays.json ships empty (see that file's docstring), so a fixed
+-- calendar-date expiry computed via is_trading_day() would silently drift
+-- across any unlisted exchange holiday. Instead, "trading days" is counted
+-- directly off real ohlcv_daily rows for this instrument each time the job
+-- checks it — data-driven, not calendar-math.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS recommendation_outcomes (
+    instrument_id         BIGINT NOT NULL REFERENCES instruments(instrument_id),
+    as_of_date            DATE NOT NULL,   -- stock_recommendations.as_of_date this call was made on
+    horizon               TEXT NOT NULL DEFAULT 'short' CHECK (horizon IN ('short','long')),
+    action                TEXT NOT NULL CHECK (action IN ('STRONG_BUY','BUY','SELL','STRONG_SELL')),
+    -- Top |weighted| rationale component name at call time (recommendation/
+    -- rationale_text.py::top_reasons, name only) — lets "accuracy by
+    -- dominant signal" aggregate without re-parsing JSONB per query.
+    dominant_component    TEXT,
+    entry_close           NUMERIC(14,4) NOT NULL,
+    target_price          NUMERIC(14,4),
+    target_is_projected   BOOLEAN NOT NULL DEFAULT FALSE,
+    stop_price            NUMERIC(14,4),
+    stop_is_projected     BOOLEAN NOT NULL DEFAULT FALSE,
+    atr_14_at_entry       NUMERIC(14,4),
+    status                TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','HIT_TARGET','HIT_STOP','EXPIRED')),
+    trading_days_elapsed  INTEGER NOT NULL DEFAULT 0,
+    resolved_date         DATE,
+    resolved_close        NUMERIC(14,4),
+    last_checked_date     DATE NOT NULL,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (instrument_id, as_of_date, horizon)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recommendation_outcomes_open
+    ON recommendation_outcomes (status, last_checked_date) WHERE status = 'OPEN';
+CREATE INDEX IF NOT EXISTS idx_recommendation_outcomes_action_status
+    ON recommendation_outcomes (action, status);
+CREATE INDEX IF NOT EXISTS idx_recommendation_outcomes_instrument
+    ON recommendation_outcomes (instrument_id, as_of_date DESC);
+
 -- Every Telegram chat that has ever messaged the bot — auto-populated by
 -- telegram_bot/commands.py on every inbound update, not a hardcoded chat ID,
 -- since multi-user support is a requirement from day one. This *is* the

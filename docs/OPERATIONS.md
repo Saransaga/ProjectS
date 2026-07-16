@@ -169,3 +169,22 @@ the way, and extended it. Commits, newest first:
   ~4 resolutions) still reproduces — left as a known dead end, not retried
   further.
 - Unpaused all 13 Airflow DAGs (see §2 above).
+
+## 4. Product dashboard (FastAPI + React) — schema migration note
+
+Adds `recommendation_outcomes` (call-tracking for `stock_recommendations`) to
+`init.sql` and a new `trading_readonly` Postgres role (`readonly_role.sh`,
+mounted into `docker-entrypoint-initdb.d/` alongside `init.sql`) for the new
+`api` service — it never logs in as the privileged `POSTGRES_USER`, so it
+can't write even if a query were misused.
+
+**`docker-entrypoint-initdb.d/*` only runs on a fresh Postgres data
+directory** — same caveat as `init.sql` itself. On this already-initialized
+deployment, apply both manually (both are idempotent, safe to rerun):
+```bash
+docker compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/init.sql
+docker compose exec -T postgres bash -c '/docker-entrypoint-initdb.d/readonly_role.sh'
+```
+New required `.env` vars: `POSTGRES_READONLY_USER`, `POSTGRES_READONLY_PASSWORD`
+(the role's own credentials), `APP_PASSWORD`/`APP_SECRET_KEY` (the dashboard's
+shared-password login gate, see `api/app/auth.py`).

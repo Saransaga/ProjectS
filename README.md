@@ -34,6 +34,30 @@ schedule), and a raw browser over every table (with a symbol filter). It
 runs on the same image as `ingestion` and reuses its job classes directly —
 no separate API.
 
+## Product dashboard
+
+A second, product-facing dashboard at **http://localhost:5173** (`web`
+service, a Vite/React/shadcn-ui SPA, plus an `api` service — FastAPI on
+**http://localhost:8000** — that it talks to). Runs alongside the Streamlit
+dashboard above rather than replacing it: Streamlit stays the raw ops tool
+(job triggers, table browser, ad-hoc SQL); this one is read-heavy and
+recommendation-centric — the current recommendation for every instrument
+with its full rationale breakdown and price target/stop/pace, BUY-call
+performance (win rate, open positions, accuracy by action bucket/dominant
+signal — see `recommendation_outcomes` above), per-job data freshness judged
+against each job's own expected cadence (`ingestion/ingestion/job_cadence.py`)
+rather than one global staleness threshold, data-source health/least-used
+sources, and a roadmap of this project's own documented deferred/dropped
+scope.
+
+Gated by a single shared app-password (`APP_PASSWORD`/`APP_SECRET_KEY` in
+`.env`) rather than per-user accounts — see `api/app/auth.py`. The `api`
+service connects to Postgres as a dedicated read-only role
+(`POSTGRES_READONLY_USER`, created by `readonly_role.sh` — see
+`docs/OPERATIONS.md` §4 for the one-time manual-apply step on an
+already-initialized database), so it can never write even if a query were
+misused.
+
 ## Usage
 
 Every job is run through one CLI (`ingestion/ingestion/cli.py`), grouped by
@@ -55,7 +79,7 @@ docker compose exec ingestion python -m ingestion.cli backfill-range --job <grou
 | `brokerage`      | `brokerage_calls`, `consensus_ratings`                                  | daily 17:00 IST, after `equity`/`index`                 |
 | `momentum`       | `fii_dii_flows`, `bulk_block_deals`, `fno_bhavcopy`, `fno_signals`, `deliverable_volume`, `relative_strength` | 17:15 IST (F&O/delivery/RS) + 18:00 IST (FII/DII) + 2 intraday windows (bulk/block deals) |
 | `events`         | `corporate_calendar`, `ipo_listings`, `index_rebalancing_schedule`       | daily 19:00 IST (calendar/IPO) + monthly 1st, 09:00 IST (rebalancing) |
-| `recommendations`| `industry_classification`, `recommendation_engine`                      | monthly 1st, 08:30 IST (classification) + daily 21:00 IST (recompute) |
+| `recommendations`| `industry_classification`, `recommendation_engine`, `recommendation_outcomes` | monthly 1st, 08:30 IST (classification) + daily 21:00 IST (recompute + outcome tracking) |
 | `telegram`       | `telegram_alerts`                                                       | daily 21:00 IST, after `recommendation_engine`           |
 | `all`            | everything above                                                         | —                                                        |
 
@@ -181,6 +205,25 @@ live from this environment — but this class of endpoint is known to be
 IP-blocked from some cloud/server hosts. If these jobs start failing, a
 blocked IP is the first thing to check, same "verify before trusting" spirit
 as `bse_client.py`'s already-unverified BSE endpoint.
+
+**`fundamentals_quarterly`/`fundamental_ratios` coverage is currently thin
+(a handful of instruments, not the ~2,400-equity universe)**: `financial_results`
+is intentionally event-driven (poll board meetings, fetch only that week's
+actual reporters — see its docstring), not a backfill job. A one-off
+370-day backfill (`FinancialResultsJob(lookback_days=370)`, see that job's
+`__init__`) correctly resolved 2,210 of 2,338 candidate symbols but got real
+filings back for only 3 — confirmed via RELIANCE that
+`nse_corporate_client.fetch_financial_results` (the `corporates-financial-results`
+endpoint, distinct from the live/current board-meetings endpoint) returns
+nothing broadcast after ~Jan 2025 in this environment, despite RELIANCE
+provably still filing on schedule past that date per its own board-meeting
+intimations. Re-verify that endpoint from the real deployment host before
+assuming a low backfill yield there is real data rather than another
+environment artifact (see `financial_results.py`'s docstring for the full
+diagnostic). Dividend yield has a second, structural limit on top of this:
+`corporate_actions` only ever holds NSE's current near-term calendar (see
+that job's own docstring) — there's no historical range to backfill from,
+coverage can only grow by accumulating each day's near-term list over time.
 
 See `--job fundamentals` in [Usage](#usage) for schedule and CLI.
 
@@ -502,6 +545,17 @@ through a multi-user Telegram bot rather than only the Streamlit dashboard.
   score itself goes `NULL` (with `{"insufficient_data": true}` in the
   paired rationale JSONB column) when fewer than half the weight budget had
   real data, rather than compute from a mostly-missing picture.
+- **`recommendation_outcomes`** (`recommendation_outcomes`): turns each day's
+  actionable short-term calls (`STRONG_BUY`/`BUY`/`SELL`/`STRONG_SELL`, HOLD
+  has no directional target) into a tracked position — snapshots the same
+  target/stop the Telegram bot would show that day
+  (`recommendation/price_levels.py`, shared with `telegram_bot/formatting.py`
+  so the two never drift apart), then walks `ohlcv_daily` forward on every
+  run to resolve it to `HIT_TARGET`/`HIT_STOP`/`EXPIRED` (15 trading days,
+  same order as the short-term score's own signal windows) or leaves it
+  `OPEN`. This is what powers the product dashboard's win-rate/performance
+  view — there was previously no way to tell whether a past BUY call actually
+  worked out.
 - **`telegram_alerts`** (`telegram_alert_log`): pushes two kinds of message
   to every chat in `telegram_chats` (auto-populated as chats message the
   bot — there's deliberately no hardcoded chat ID, since multi-user support
@@ -515,7 +569,12 @@ through a multi-user Telegram bot rather than only the Streamlit dashboard.
   job): an always-on long-poll loop against the Telegram Bot API, its own
   `docker-compose` service since a permanent blocking loop can't be modeled
   as a scheduled tick. Answers `/watch`, `/unwatch`, `/list`, `/recommend`,
-  or a bare symbol/company-name lookup — free-text company names resolve via
+  `/top` (today's top 5 short-term BUY ideas), `/52wlow` (stocks currently
+  trending within `NEAR_LOW_PCT` of their trailing-365-day low —
+  `query/snapshot.stocks_near_52_week_low`), `/dividends` (highest
+  trailing-12-month dividend-yield stocks —
+  `query/snapshot.top_dividend_yield`), or a bare symbol/company-name
+  lookup — free-text company names resolve via
   `query/resolve.py`, which reuses Domain 4's
   `news/ticker_matching.normalize_name` for fuzzy matching (with its own
   bidirectional containment check, since a short chat query like "reliance"

@@ -27,6 +27,7 @@ from ingestion.jobs.index_eod import IndexEodJob
 from ingestion.jobs.index_rebalancing import IndexRebalancingScheduleJob
 from ingestion.jobs.ipo_listings import IpoListingsJob
 from ingestion.jobs.nse_announcements import NseAnnouncementsJob
+from ingestion.jobs.recommendation_outcomes import RecommendationOutcomesJob
 from ingestion.jobs.reddit_sentiment import RedditSentimentJob
 from ingestion.jobs.relative_strength import RelativeStrengthJob
 from ingestion.jobs.rss_news import RssNewsJob
@@ -61,6 +62,7 @@ JOBS = {
     "corporate_calendar": CorporateCalendarJob,
     "ipo_listings": IpoListingsJob,
     "index_rebalancing_schedule": IndexRebalancingScheduleJob,
+    "recommendation_outcomes": RecommendationOutcomesJob,
 }
 
 # table -> (date column to sort/filter by, symbol-filter mode: None = no
@@ -98,6 +100,7 @@ TABLES = {
     "index_rebalancing_schedule": ("updated_at", None),
     "macro_events": ("event_date", None),
     "ingestion_log": ("run_date", None),
+    "recommendation_outcomes": ("as_of_date", "instrument"),
 }
 
 

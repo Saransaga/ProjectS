@@ -24,6 +24,7 @@ from .jobs.industry_classification import IndustryClassificationJob
 from .jobs.ipo_listings import IpoListingsJob
 from .jobs.nse_announcements import NseAnnouncementsJob
 from .jobs.recommendation_engine import RecommendationEngineJob
+from .jobs.recommendation_outcomes import RecommendationOutcomesJob
 from .jobs.reddit_sentiment import RedditSentimentJob
 from .jobs.relative_strength import RelativeStrengthJob
 from .jobs.rss_news import RssNewsJob
@@ -125,9 +126,13 @@ def _run_monthly_industry_classification():
 def _run_daily_recommendation_jobs():
     # RecommendationEngineJob reads the day's technicals (16:00), consensus
     # (17:00), momentum/F&O (17:15), and fundamentals (18:30) — scheduled
-    # after all of those daily slots. TelegramAlertsJob reads
-    # stock_recommendations, so it must follow in this same run.
-    _run_jobs(RecommendationEngineJob(), TelegramAlertsJob())
+    # after all of those daily slots. RecommendationOutcomesJob reads today's
+    # fresh stock_recommendations row (to open new tracked calls) and
+    # ohlcv_daily (to resolve already-open ones), so it must follow
+    # RecommendationEngineJob; TelegramAlertsJob also reads
+    # stock_recommendations and has no dependency on RecommendationOutcomesJob
+    # either way, so it's kept grouped here rather than reordered.
+    _run_jobs(RecommendationEngineJob(), RecommendationOutcomesJob(), TelegramAlertsJob())
 
 
 def build_scheduler() -> BlockingScheduler:

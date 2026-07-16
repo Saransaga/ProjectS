@@ -22,13 +22,40 @@ class FinancialResultsJob(BaseJob):
     """The spec's "within 24h of filing, webhook/poll" requirement, implemented
     as: bulk-poll board meetings for "Financial Results" purpose (cheap, one
     call, all symbols), then only call the per-symbol financial-results/XBRL
-    endpoints for that day's actual reporters — not all ~2,400 equities."""
+    endpoints for that day's actual reporters — not all ~2,400 equities.
+
+    lookback_days defaults to the daily-cron window (_BOARD_MEETING_LOOKBACK_DAYS)
+    but is overridable for a one-off historical backfill (e.g. ~370 days to
+    sweep up the last ~4 quarters for every symbol in one run) without
+    touching the production schedule's window.
+
+    UNVERIFIED FROM THIS ENVIRONMENT, distinct from the corporate-board-
+    meetings endpoint this same job also calls (that one is live/current —
+    it shows RELIANCE board meetings through Apr 2026): a 370-day backfill
+    run from here (2338 candidate symbols, 2210 resolved to instruments)
+    against nse_corporate_client.fetch_financial_results — the
+    corporates-financial-results endpoint — came back with real filings for
+    only 3 symbols, all late filers. Directly confirmed via RELIANCE (an
+    on-time large-cap filer): querying that endpoint across 2020-today
+    returns 41 filings, none broadcast after 16-Jan-2025, even though
+    RELIANCE's own board-meeting intimations show it kept reporting on
+    schedule well past that date. So this endpoint's data in this
+    environment reads as frozen/stale at ~Jan 2025 rather than genuinely
+    empty for most symbols — same "verify before trusting" situation as
+    reddit_client.py and bse_client.py's environment-specific caveats.
+    Before relying on this for real coverage: re-run the diagnostic above
+    against the actual production host and confirm recent large-cap filings
+    come back before assuming any low yield here is real data, not another
+    environment artifact."""
 
     job_name = "financial_results"
 
+    def __init__(self, lookback_days: int = _BOARD_MEETING_LOOKBACK_DAYS):
+        self.lookback_days = lookback_days
+
     def fetch(self, run_date: date) -> list[dict]:
         meetings = nse_corporate_client.fetch_board_meetings(
-            run_date - timedelta(days=_BOARD_MEETING_LOOKBACK_DAYS), run_date
+            run_date - timedelta(days=self.lookback_days), run_date
         )
         candidate_symbols = sorted(
             {
@@ -50,7 +77,7 @@ class FinancialResultsJob(BaseJob):
                 try:
                     filings = nse_corporate_client.fetch_financial_results(
                         symbol,
-                        from_date=run_date - timedelta(days=_BOARD_MEETING_LOOKBACK_DAYS),
+                        from_date=run_date - timedelta(days=self.lookback_days),
                         to_date=run_date,
                     )
                 except Exception:

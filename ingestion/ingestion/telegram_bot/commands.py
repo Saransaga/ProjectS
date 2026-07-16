@@ -11,14 +11,25 @@ import logging
 from .. import telegram_client
 from ..query.resolve import AmbiguousQueryError, resolve
 from ..query.snapshot import (
+    NEAR_LOW_PCT,
     latest_close,
     latest_recommendation,
     latest_recommendation_date,
     price_levels,
+    stocks_near_52_week_low,
+    top_dividend_yield,
     top_movers,
 )
 from ..upsert_telegram import add_watch, list_watchlist, mark_chat_inactive, remove_watch, upsert_chat
-from .formatting import format_ambiguous, format_help, format_recommendation, format_top_buys, format_watchlist
+from .formatting import (
+    format_52_week_lows,
+    format_ambiguous,
+    format_dividend_leaders,
+    format_help,
+    format_recommendation,
+    format_top_buys,
+    format_watchlist,
+)
 
 _TOP_N = 5
 
@@ -58,6 +69,10 @@ def _dispatch(conn, chat_id: int, text: str) -> str:
         return _handle_recommend(conn, text[len("/recommend"):].strip())
     if text.startswith("/top"):
         return _handle_top(conn)
+    if text.startswith("/52wlow"):
+        return _handle_52_week_low(conn)
+    if text.startswith("/dividends"):
+        return _handle_dividends(conn)
     return _handle_recommend(conn, text)  # bare text: treat as a lookup
 
 
@@ -92,6 +107,16 @@ def _handle_top(conn) -> str:
         close = latest_close(conn, entry["instrument_id"])
         entry["levels"] = price_levels(conn, entry["instrument_id"], close["close"] if close else None)
     return format_top_buys(as_of_date, entries)
+
+
+def _handle_52_week_low(conn) -> str:
+    entries = stocks_near_52_week_low(conn, limit=_TOP_N)
+    return format_52_week_lows(entries, near_pct=NEAR_LOW_PCT)
+
+
+def _handle_dividends(conn) -> str:
+    entries = top_dividend_yield(conn, limit=_TOP_N)
+    return format_dividend_leaders(entries)
 
 
 def _handle_watch(conn, chat_id: int, query: str) -> str:

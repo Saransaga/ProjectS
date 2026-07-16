@@ -5,8 +5,25 @@ jobs/recommendation_engine.py's bulk per-universe lookups since the bot only
 ever needs one instrument (or the top-N digest) at a time.
 """
 
+from datetime import date, timedelta
+
 _HORIZONS = ("short", "long")
 _DIRECTIONS = ("buy", "sell")
+
+# "52-week" low uses a trailing 365-calendar-day window over ohlcv_daily,
+# same convention as the NSE/exchange-quoted 52-week high/low.
+_LOOKBACK_DAYS = 365
+# Only instruments that actually traded in the last week count as
+# "currently" near their low — otherwise a stale/delisted instrument whose
+# last recorded close happens to be its lowest would show up forever.
+_STALE_DAYS = 7
+# "Near" the 52-week low, not just the exact tick that set it — a stock
+# within this band of its trailing low reads as "trending at" the low to a
+# screener user, and an exact-match filter would only ever catch the single
+# day the low was actually set. Public (no leading underscore): also used
+# by telegram_bot/commands.py to label the /52wlow reply with the same
+# threshold actually applied here.
+NEAR_LOW_PCT = 3.0
 
 
 def latest_recommendation(conn, instrument_id: int) -> dict | None:
@@ -150,4 +167,85 @@ def top_movers(conn, as_of_date, horizon: str, direction: str, limit: int = 5) -
                 "score": float(score), "action": action, "rationale": rationale,
             }
             for instrument_id, symbol, name, score, action, rationale in cur.fetchall()
+        ]
+
+
+def stocks_near_52_week_low(
+    conn, limit: int = 10, near_pct: float = NEAR_LOW_PCT
+) -> list[dict]:
+    """Instruments whose latest close is within `near_pct`% of their own
+    trailing-365-day low (over ohlcv_daily.low), ranked closest-to-low
+    first. Restricted to instruments that traded within the last
+    _STALE_DAYS days, so a stale/delisted instrument's frozen last close
+    can't masquerade as "currently" near a low."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH bounds AS (
+                SELECT instrument_id, min(low) AS low_52w
+                FROM ohlcv_daily
+                WHERE trade_date >= %s
+                GROUP BY instrument_id
+            ),
+            latest AS (
+                SELECT DISTINCT ON (instrument_id) instrument_id, trade_date, close
+                FROM ohlcv_daily
+                ORDER BY instrument_id, trade_date DESC
+            )
+            SELECT i.symbol, i.name, l.close, b.low_52w, l.trade_date
+            FROM bounds b
+            JOIN latest l USING (instrument_id)
+            JOIN instruments i USING (instrument_id)
+            WHERE l.trade_date >= %s
+              AND b.low_52w > 0
+              AND l.close <= b.low_52w * (1 + %s / 100.0)
+            ORDER BY (l.close - b.low_52w) / b.low_52w ASC
+            LIMIT %s
+            """,
+            (
+                date.today() - timedelta(days=_LOOKBACK_DAYS),
+                date.today() - timedelta(days=_STALE_DAYS),
+                near_pct,
+                limit,
+            ),
+        )
+        return [
+            {
+                "symbol": symbol, "name": name, "close": float(close),
+                "low_52w": float(low_52w), "trade_date": trade_date,
+                "pct_above_low": (float(close) - float(low_52w)) / float(low_52w) * 100.0,
+            }
+            for symbol, name, close, low_52w, trade_date in cur.fetchall()
+        ]
+
+
+def top_dividend_yield(conn, limit: int = 10) -> list[dict]:
+    """Highest-dividend-yield instruments, one row per instrument (its most
+    recent fundamental_ratios.as_of_date), ranked by dividend_yield desc.
+    dividend_yield itself is trailing-12-month dividends per share over
+    price (see jobs/fundamental_ratios.py), so this already reads as
+    "highest dividend paying stocks" rather than a single most-recent
+    payout."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT symbol, name, dividend_yield, as_of_date FROM (
+                SELECT DISTINCT ON (r.instrument_id)
+                    i.symbol, i.name, r.dividend_yield, r.as_of_date
+                FROM fundamental_ratios r
+                JOIN instruments i USING (instrument_id)
+                WHERE r.dividend_yield IS NOT NULL AND r.dividend_yield > 0
+                ORDER BY r.instrument_id, r.as_of_date DESC
+            ) latest
+            ORDER BY dividend_yield DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        return [
+            {
+                "symbol": symbol, "name": name,
+                "dividend_yield": float(dividend_yield), "as_of_date": as_of_date,
+            }
+            for symbol, name, dividend_yield, as_of_date in cur.fetchall()
         ]

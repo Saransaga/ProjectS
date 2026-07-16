@@ -165,14 +165,31 @@ _RENDERERS = {
 }
 
 
+def _scored_components(rationale: dict | None) -> list[dict]:
+    """Components with a real (non-None) weighted contribution, largest
+    |weighted| first — the shared selection logic behind top_reasons() and
+    dominant_component_name()."""
+    if not rationale:
+        return []
+    scored = [c for c in rationale.get("components", []) if c.get("weighted") is not None]
+    scored.sort(key=lambda c: abs(c["weighted"]), reverse=True)
+    return scored
+
+
 def top_reasons(rationale: dict | None, limit: int = 3) -> list[str]:
     """The `limit` components with the largest |weighted| contribution
     (components with no data, i.e. weighted is None, are excluded — same
     NULL-vs-0 discipline as aggregate.py), each rendered via its
     component-specific formatter. Empty list when rationale is None/empty or
     every component is unavailable."""
-    if not rationale:
-        return []
-    scored = [c for c in rationale.get("components", []) if c.get("weighted") is not None]
-    scored.sort(key=lambda c: abs(c["weighted"]), reverse=True)
+    scored = _scored_components(rationale)
     return [_RENDERERS.get(c["name"], lambda d, n=c["name"], s=c["subscore"]: f"{n}: {s:+.2f}")(c["detail"]) for c in scored[:limit]]
+
+
+def dominant_component_name(rationale: dict | None) -> str | None:
+    """The single component name (not rendered text) with the largest
+    |weighted| contribution — used by jobs/recommendation_outcomes.py to tag
+    each tracked call with which signal drove it, for "accuracy by dominant
+    signal" reporting. None when every component is unavailable."""
+    scored = _scored_components(rationale)
+    return scored[0]["name"] if scored else None

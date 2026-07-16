@@ -7,11 +7,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_READONLY_USER: ${POSTGRES_READONLY_USER}
+      POSTGRES_READONLY_PASSWORD: ${POSTGRES_READONLY_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - /data/postgres:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./readonly_role.sh:/docker-entrypoint-initdb.d/readonly_role.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -74,6 +77,51 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    networks:
+      - storage
+
+  # Product dashboard's API — FastAPI, reuses the pure query/recommendation
+  # modules from ingestion/ingestion directly (see api/Dockerfile for why the
+  # build context is the repo root). Connects to Postgres as the read-only
+  # trading_readonly role (readonly_role.sh), never the privileged
+  # POSTGRES_USER every other service above uses, so it can never write even
+  # if a query were misused.
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: storage-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      TZ: Asia/Kolkata
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - storage
+
+  # Product dashboard's frontend — Vite/React/shadcn-ui, built to static
+  # assets and served by nginx, which also reverse-proxies /api/* to the
+  # `api` service above (same-origin, so the session cookie from
+  # api/app/auth.py just works, no CORS needed).
+  web:
+    build:
+      context: ./web
+    container_name: storage-web
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      api:
         condition: service_healthy
     networks:
       - storage
