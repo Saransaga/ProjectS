@@ -1,5 +1,6 @@
-# Storage (self-hosted)
+# Project StockX 
 
+Storage:
 PostgreSQL 15 + TimescaleDB and Redis 7, persisted to `/data` on the host.
 
 ## Start
